@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import classroom_engine as engine
+from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('HARU_DB', str(ROOT/'haru.db')))
@@ -95,7 +97,10 @@ def init():
    if col not in columns:c.execute(f'ALTER TABLE prices ADD COLUMN {col} INTEGER')
   if 'mood' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
-  # Existing games keep their original closing prices. Historic candles are reconstructed from adjacent closes.
+  engine.initialize_schema(c)
+  for existing in c.execute('SELECT id,seed,day FROM rooms').fetchall():
+   engine.ensure_room(c,existing['id'],existing['seed'],existing['day'],ASSETS)
+  # Existing games keep their closing prices and balances; financial baselines are added lazily.
 init()
 
 def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -127,54 +132,11 @@ def record_all(c,rid,day):
   c.execute('INSERT OR REPLACE INTO daily_values(room_id,player_id,day,net,cash) VALUES(?,?,?,?,?)',(rid,p['id'],day,snapshot_value(c,p['id'],rid,day),p['cash']))
 
 
-# Procedural newsroom: news published on day N influences day N+1 prices.
-MOODS={'positive':'긍정','neutral':'중립','negative':'부정'}
-NEWS_TEMPLATES={
- 'contract': [('신규 납품 계약 협의가 진전', '신규 납품 협상에 진전이 있다고 밝혔다. 다만 계약 금액과 실제 수익은 아직 확정되지 않았다.'),('대형 계약 조건을 재검토', '거래 상대방과 가격·납기 조건을 다시 협의한다. 계약 확정이 지연될 경우 매출 계획에도 영향이 있을 수 있다.'),('계약 발표 전 신중론 확산', '신규 계약에 대한 추측이 퍼졌지만 회사는 확정된 내용이 없다고 밝혔다. 시장은 실제 공시를 기다리고 있다.')],
- 'sales': [('제품·서비스 주문량 증가', '고객 주문이 늘었다고 전했다. 판매 증가가 이익으로 연결되는지는 원가와 비용을 확인해야 한다.'),('판매 기대에 못 미쳤다는 분석', '최근 수요가 예상보다 약하다는 평가가 나왔다. 회사는 판매 전략을 조정할 계획이다.'),('수요 전망을 둘러싼 의견 엇갈려', '일부 분석가는 고객층 확대를 기대하지만 다른 쪽은 일시적 유행일 가능성을 제기한다.')],
- 'cost': [('생산·운영 비용 절감 추진', '비용을 줄일 새로운 방법을 검토한다. 효과가 실제 실적에 반영되려면 시간이 필요하다.'),('예상 밖 비용 증가에 부담', '원재료와 인건비 부담이 커졌다고 설명했다. 매출이 같아도 이익은 감소할 수 있다.'),('운영비 변동성에 시장 주목', '비용 수준이 앞으로 어떻게 변할지 불확실하다. 회사는 효율화 계획을 검토 중이다.')],
- 'research': [('신기술 시험에서 긍정적 신호', '기술 검증에서 일부 개선 결과가 관찰됐다. 정식 상용화까지는 추가 시험이 필요하다.'),('개발 일정 지연 가능성 제기', '신기술 검증 과정에서 보완 사항이 발견됐다. 추가 연구비와 일정 조정이 필요할 수 있다.'),('신제품 평가 앞두고 기대와 우려', '시제품 평가가 진행 중이다. 결과가 나올 때까지 성공 여부를 단정하기 어렵다.')],
- 'finance': [('자금 여력 개선 기대', '현금 관리와 자금 조달 여건이 나아지고 있다는 평가가 나왔다. 정확한 결과는 다음 실적 발표에서 확인된다.'),('자금 조달 비용 부담 확대', '사업 확장에 필요한 자금의 비용이 늘어날 수 있다는 지적이 나왔다. 회사는 투자 규모를 점검 중이다.'),('재무 안정성 재평가', '투자자들이 매출 성장뿐 아니라 현금 보유액과 부채 수준을 함께 살피고 있다.')],
- 'competition': [('경쟁사보다 유리한 입지 확보', '경쟁사와의 가격·품질 비교에서 호평을 얻었다는 시장 평가가 나왔다. 실제 점유율 변화는 더 지켜봐야 한다.'),('경쟁 심화로 수익성 압박', '경쟁사의 공격적인 판매 전략 때문에 가격 방어가 어려워질 수 있다는 분석이 나왔다.'),('업계 경쟁 구도 변화 가능성', '경쟁사들이 신제품과 서비스를 준비하고 있어 기업별 성과 차이가 벌어질 수 있다.')],
- 'supply': [('공급망 개선으로 출하 기대', '부품·원료 공급이 비교적 안정되면서 납기 개선 가능성이 제기됐다.'),('부품·원료 수급 차질 경고', '핵심 공급업체의 납기가 불안정해 생산 계획에 차질이 생길 수 있다고 밝혔다.'),('공급망 점검 나서', '거래처를 다양화하는 방안을 검토 중이다. 초기 비용과 장기 안정성 사이에서 선택이 필요하다.')],
-}
-NEWS_TOPICS=list(NEWS_TEMPLATES)
+# Business events, public news and quarterly accounts share one persistent model.
+MOODS=engine.MOOD_NAMES
 
 def publish_dynamic_news(c,rid,day,seed,mood):
- """Deterministic per room/day, company-specific, assorted, non-scripted, persisted."""
- if one(c,'SELECT 1 FROM news WHERE room_id=? AND day=?',(rid,day)):return
- rng=random.Random(seed+day*9187+103)
- stocks=[a for a in ASSETS if a['type']=='stock']
- rng.shuffle(stocks)
- chosen=[]
- for sector in ['기술','항공','식품','의료·제약','미래사업']:
-  pool=[a for a in stocks if a['sector']==sector]
-  chosen.append(pool[0])
- chosen.append(next(a for a in stocks if a['id'] not in {x['id'] for x in chosen}))
- rng.shuffle(chosen)
- topics=rng.sample(NEWS_TOPICS,len(chosen))
- # Mood changes the PROBABILITY of favorable/unfavorable developments, not a guaranteed return.
- weight={'positive':[.64,.13,.23],'neutral':[.33,.34,.33],'negative':[.22,.14,.64]}[mood]
- for i,(a,topic) in enumerate(zip(chosen,topics)):
-  roll=rng.random(); variant=0 if roll<weight[0] else (2 if roll<weight[0]+weight[2] else 1)
-  # Template index: positive=0, negative=1, mixed=2.
-  variant={0:0,1:2,2:1}[variant]
-  subject,body=NEWS_TEMPLATES[topic][variant]
-  previous=one(c,'SELECT title,impact FROM news WHERE room_id=? AND day<? AND sector=? ORDER BY day DESC,id DESC LIMIT 1',(rid,day,a['id']))
-  follow=('최근 해당 기업을 둘러싼 보도가 이어지는 가운데, ' if previous else '')
-  # Volatile firms get stronger but capped effects. Articles act the *next* day.
-  magnitude=rng.uniform(1.2,2.8)*({'stable':.75,'growth':1.0,'high':1.4}[a['risk']])
-  impact=round((1 if variant==0 else -1 if variant==1 else rng.choice([-1,1])*.15)*magnitude,2)
-  title=f'{a["name"]}, {subject}'
-  body=f'{follow}{a["name"]}은(는) {body} 시장 관계자들은 확정된 결과와 전망을 구별해야 한다고 설명했다.'
-  c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,?)',(rid,day,title,body,a['id'],impact))
- # Add an independent sector outlook with weaker spillover and a non-directional brief.
- focus=rng.choice(['기술','항공','식품','의료·제약','미래사업'])
- level={'positive':'완만한 개선 기대','neutral':'엇갈리는 전망','negative':'불확실성 확대'}[mood]
- sector_impact=round(rng.uniform(.2,1.0)*(1 if mood=='positive' else -1 if mood=='negative' else rng.choice([-1,1])*.25),2)
- c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,?)',(rid,day,f'{focus} 업종, {level}',f'{focus} 업종에서는 기업별 계약 상황과 비용 부담을 둘러싸고 다양한 평가가 나온다. 오늘 뉴스가 미래 주가를 반드시 보장하지는 않는다.',focus,sector_impact))
- c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,0)',(rid,day,'오늘의 투자 체크: 같은 업종도 결과는 다를 수 있다',f'시장은 전반적으로 {MOODS[mood]} 분위기다. 개별 기업의 호재·악재와 가격 변동을 따로 살펴보고 분산투자를 고민해 보자.','전체'))
- log(c,rid,day,'auto_news',f'{MOODS[mood]} 분위기 · 자동 뉴스 8건 · 다음 거래일에 영향')
+ engine.publish_news(c,rid,day,seed,mood,ASSETS)
 
 class CreateRoom(BaseModel):
  name:str=Field(min_length=2,max_length=50)
@@ -188,7 +150,12 @@ class AdminLogin(BaseModel):
  code:str
  password:str
 
-class OrderIn(BaseModel): asset:str; side:str; qty:int=Field(ge=1,le=100000); reason:str=Field(min_length=2,max_length=500)
+class OrderIn(BaseModel):
+ asset:str
+ side:str
+ qty:int=Field(ge=1,le=100000)
+ reason:str=Field(min_length=2,max_length=500)
+ evidence_ids:list[int]=Field(default_factory=list,max_length=5)
 class DepositIn(BaseModel): principal:int=Field(ge=1000,le=100000000); term:int
 class NewsIn(BaseModel): title:str=Field(min_length=2,max_length=120); body:str=Field(min_length=2,max_length=400); sector:str='전체'; impact:float=Field(default=0,ge=-12,le=12)
 class CashEdit(BaseModel): player_id:int; amount:int=Field(ge=-100000000,le=100000000); reason:str=Field(min_length=2,max_length=120)
@@ -198,7 +165,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True}
+ return {'ok': True,'version':'6.0-research'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -218,6 +185,7 @@ def share(authorization:str|None=Header(None)):
 @app.post('/api/rooms')
 def create_room(b:CreateRoom):
  with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
   for i in range(12):
    code=secrets.token_hex(3).upper()
    if not one(c,'SELECT id FROM rooms WHERE code=?',(code,)):break
@@ -260,17 +228,22 @@ def join(b:Join):
 def state(authorization:str|None=Header(None)):
  s=session(authorization)
  with conn() as c:
+  c.execute('BEGIN')
   r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood FROM rooms WHERE id=?',(s['room_id'],)))
+  engine.ensure_room(c,r['id'],one(c,'SELECT seed FROM rooms WHERE id=?',(r['id'],))['seed'],r['day'],ASSETS)
   prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   price_map={x['asset']:x for x in prices}
   out={'room':r,'role':s['role'],'assets':[{**a,**price_map.get(a['id'],{})} for a in ASSETS],
-       'news':rows(c,'SELECT id,day,title,body,sector FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 140',(r['id'],r['day'])),
+       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 400',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
+  out.update(engine.public_data(c,r['id'],r['day']))
+  for n in out['news']:n['related_assets']=json.loads(n['related_assets'])
   if s['role']=='player':
    pid=s['player_id']; p=dict(one(c,'SELECT id,name,cash FROM players WHERE id=?',(pid,)))
    holdings=rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,))
    deposits=rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))
-   orders=rows(c,'SELECT id,asset,side,qty,price,status,reason,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
+   orders=rows(c,'SELECT id,asset,side,qty,price,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
+   out.update(learning_data(c,pid,r['id']))
    p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],pid,r['day'])))
    p['net']=snapshot_value(c,pid,r['id'],r['day']); p['profit']=p['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
    out.update(player=p,holdings=holdings,deposits=deposits,orders=orders,
@@ -281,25 +254,27 @@ def state(authorization:str|None=Header(None)):
    for p in out['participants']:
     p['net']=snapshot_value(c,p['id'],r['id'],r['day'])
     p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],p['id'],r['day'])))
+    p.update(learning_summary(c,p['id']))
     p['pending']=one(c,"SELECT COUNT(*) n FROM orders WHERE player_id=? AND status='pending'",(p['id'],))['n']
    out['ready_count']=sum(p['day_ready'] for p in out['participants'])
    out['all_ready']=bool(out['participants']) and out['ready_count']==len(out['participants'])
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
-   out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.status,o.reason FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
+   out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
   return out
 @app.get('/api/admin/student/{pid}')
 def admin_student(pid:int,authorization:str|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
+  c.execute('BEGIN')
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   p=one(c,'SELECT id,name,cash FROM players WHERE id=? AND room_id=?',(pid,s['room_id']))
   if not p:err('해당 학생을 찾을 수 없습니다.',404)
   player=dict(p)
   player['net']=snapshot_value(c,pid,r['id'],r['day'])
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
-  return {'player':player,'holdings':rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,)),
+  return {**learning_data(c,pid,r['id']),'player':player,'holdings':rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,)),
     'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
-    'orders':rows(c,'SELECT id,asset,side,qty,price,status,reason,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
+    'orders':rows(c,'SELECT id,asset,side,qty,price,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
     'values':rows(c,'SELECT day,net,cash FROM daily_values WHERE player_id=? ORDER BY day',(pid,))}
 
@@ -350,6 +325,8 @@ def place_order(b:OrderIn,authorization:str|None=Header(None)):
   rid=s['room_id'];pid=s['player_id'];r=one(c,'SELECT * FROM rooms WHERE id=?',(rid,))
   if r['phase']!='trading':err('현재 주문 가능한 상태가 아닙니다.')
   if one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(rid,pid,r['day'])):err('오늘 선택을 완료했어요. 거래하려면 선택 완료를 취소하세요.')
+  evidence=validate_evidence(c,rid,r['day'],b.evidence_ids)
+  if len(b.reason.strip())<2:err('투자 이유를 2자 이상 적어주세요.')
   price=one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,r['day'],b.asset))['price'];value=price*b.qty
   h=one(c,'SELECT * FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
   cash=one(c,'SELECT cash FROM players WHERE id=?',(pid,))['cash']
@@ -364,7 +341,7 @@ def place_order(b:OrderIn,authorization:str|None=Header(None)):
    remaining=h['qty']-b.qty;cost=round(h['cost']*remaining/h['qty'])
    if remaining:c.execute('UPDATE holdings SET qty=?,cost=? WHERE player_id=? AND asset=?',(remaining,cost,pid,b.asset))
    else:c.execute('DELETE FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
-  cur=c.execute('INSERT INTO orders(room_id,player_id,asset,side,qty,price,status,reason,created,filled_day) VALUES(?,?,?,?,?,?,?,?,?,?)',(rid,pid,b.asset,b.side,b.qty,price,'filled',b.reason.strip(),now(),r['day']))
+  cur=c.execute('INSERT INTO orders(room_id,player_id,asset,side,qty,price,status,reason,created,filled_day,evidence_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(rid,pid,b.asset,b.side,b.qty,price,'filled',b.reason.strip(),now(),r['day'],json.dumps(evidence)))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,pid,r['day'],'trade',value*(-1 if b.side=='buy' else 1),f"{b.asset} {'매수' if b.side=='buy' else '매도'} {b.qty}주 (즉시 체결)"))
   record_all(c,rid,r['day'])
   log(c,rid,r['day'],'trade',f'{pid}번 학생 {b.asset} {b.side} {b.qty}주 즉시 체결')
@@ -461,7 +438,7 @@ def close_market(authorization:str|None=Header(None)):
   log(c,rid,r['day'],'close',f'마감: 체결 {filled}건, 거절 {rejected}건')
  return {'ok':True,'filled':filled,'rejected':rejected}
 
-def generate_prices(c,rid,day,seed):
+def generate_prices(c,rid,day,seed,earnings=None):
  rng=random.Random(seed+day*10007)
  previous={p['asset']:p['price'] for p in rows(c,'SELECT asset,price FROM prices WHERE room_id=? AND day=?',(rid,day-1))}
  effects=rows(c,'SELECT sector,impact,title FROM news WHERE room_id=? AND day=? AND active=1',(rid,day-1))
@@ -471,9 +448,9 @@ def generate_prices(c,rid,day,seed):
  for a in ASSETS:
   id=a['id'];risk=a['risk'];old=previous[id]
   if a['type']=='stock':
-   vol={'stable':1.35,'growth':3.5,'high':6.5}[risk]
+   vol={'stable':.65,'growth':1.5,'high':3.0}[risk]
    news=sum(e['impact'] for e in effects if e['sector'] in ('전체',a['sector'],id))
-   ret=market*0.7+sectors[a['sector']]+news+rng.gauss(0,vol)
+   ret=market*0.45+sectors[a['sector']]*.5+news+(earnings or {}).get(id,0)+rng.gauss(0,vol)
    cap={'stable':12,'growth':20,'high':35}[risk]
    ret=max(-cap,min(cap,ret))
   elif a['type']=='gold':
@@ -518,7 +495,10 @@ def next_day(authorization:str|None=Header(None)):
   if r['phase']!='closed':err('먼저 하루 주문을 마감하세요.')
   if r['day']>=24:err('게임이 종료되었습니다.')
   day=r['day']+1
-  generate_prices(c,rid,day,r['seed'])
+  engine.evolve_businesses(c,rid,day,r['seed'],ASSETS)
+  engine.resolve_events(c,rid,day,r['seed'],ASSETS)
+  earnings=engine.release_earnings(c,rid,day,r['seed'],ASSETS)
+  generate_prices(c,rid,day,r['seed'],earnings)
   c.execute("UPDATE rooms SET day=?,phase='trading' WHERE id=?",(day,rid))
   for d in rows(c,"SELECT * FROM deposits WHERE room_id=? AND status='active' AND start_day+term-1<=?",(rid,day)):
    paid=d['principal']+round(d['principal']*d['rate'])
@@ -526,8 +506,6 @@ def next_day(authorization:str|None=Header(None)):
    c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,d['player_id']))
    c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,d['player_id'],day,'interest',paid,f"{d['term']}일 예금 만기 수령"))
   publish_dynamic_news(c,rid,day,r['seed'],r['mood'])
-  if day in (7,13,19):
-   c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,0)',(rid,day,'📊 분기 보고서: 이야기가 숫자로 이어졌을까?','지난 분기 주가의 흐름을 돌아보세요. 계약이 실제 매출과 이익으로 이어졌는지, 기대와 결과가 어떻게 달랐는지 토론해 보세요.','전체'))
   record_all(c,rid,day)
   log(c,rid,day,'next',f'{day}일차 시작 및 가격 갱신')
  return {'ok':True,'day':day}
@@ -573,3 +551,129 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None)):
  return {'ok':True}
 @app.get('/api/health')
 def health():return {'ok':True,'db':str(DB.name)}
+
+# Reading, evidence and reflection are separate from financial performance.
+def validate_evidence(c,rid,day,ids):
+ ids=list(dict.fromkeys(ids))
+ for nid in ids:
+  if not one(c,'SELECT 1 FROM news WHERE id=? AND room_id=? AND day<=? AND active=1',(nid,rid,day)):
+   err('근거 뉴스가 현재 게임방에 공개된 기사인지 확인하세요.')
+ return ids
+
+def learning_summary(c,pid):
+ return {
+  'read_count':one(c,'SELECT COUNT(*) n FROM reading_log WHERE player_id=?',(pid,))['n'],
+  'note_count':one(c,'SELECT COUNT(*) n FROM investment_notes WHERE player_id=?',(pid,))['n'],
+  'evidence_trades':one(c,"SELECT COUNT(*) n FROM orders WHERE player_id=? AND evidence_ids!='[]'",(pid,))['n'],
+  'reflection_count':one(c,"SELECT COUNT(*) n FROM investment_notes WHERE player_id=? AND reflection!=''",(pid,))['n']}
+
+def learning_data(c,pid,rid):
+ notes=rows(c,'''SELECT n.id,n.day,n.asset,n.thesis,n.risk,n.horizon,n.evidence_ids,n.reflection,n.created,
+                       p.price AS entry_price FROM investment_notes n LEFT JOIN prices p
+                       ON p.room_id=n.room_id AND p.day=n.day AND p.asset=n.asset
+                       WHERE n.player_id=? AND n.room_id=? ORDER BY n.id DESC LIMIT 100''',(pid,rid))
+ for n in notes:n['evidence_ids']=json.loads(n['evidence_ids'])
+ return {'read_ids':[x['news_id'] for x in rows(c,'SELECT news_id FROM reading_log WHERE player_id=? AND room_id=?',(pid,rid))],
+         'watchlist':[x['asset'] for x in rows(c,'SELECT asset FROM watchlist WHERE player_id=?',(pid,))],
+         'notes':notes,'learning':learning_summary(c,pid)}
+
+class WatchIn(BaseModel):
+ asset:str
+ enabled:bool=True
+
+@app.post('/api/watchlist')
+def update_watchlist(b:WatchIn,authorization:str|None=Header(None)):
+ s=session(authorization)
+ if s['role']!='player':err('학생 계정이 필요합니다.',403)
+ if b.asset not in AMAP:err('상품을 찾을 수 없습니다.',404)
+ with conn() as c:
+  if b.enabled:c.execute('INSERT OR IGNORE INTO watchlist VALUES(?,?)',(s['player_id'],b.asset))
+  else:c.execute('DELETE FROM watchlist WHERE player_id=? AND asset=?',(s['player_id'],b.asset))
+ return {'ok':True}
+
+@app.post('/api/news/{nid}/read')
+def read_article(nid:int,authorization:str|None=Header(None)):
+ s=session(authorization)
+ if s['role']!='player':err('학생 계정이 필요합니다.',403)
+ with conn() as c:
+  day=one(c,'SELECT day FROM rooms WHERE id=?',(s['room_id'],))['day']
+  validate_evidence(c,s['room_id'],day,[nid])
+  c.execute('INSERT OR IGNORE INTO reading_log VALUES(?,?,?,?)',(s['player_id'],s['room_id'],nid,day))
+ return {'ok':True}
+
+class NoteIn(BaseModel):
+ asset:str
+ thesis:str=Field(min_length=5,max_length=700)
+ risk:str=Field(min_length=2,max_length=500)
+ horizon:str=Field(default='다음 실적 발표까지',min_length=2,max_length=60)
+ evidence_ids:list[int]=Field(default_factory=list,max_length=5)
+
+@app.post('/api/notes')
+def create_note(b:NoteIn,authorization:str|None=Header(None)):
+ s=session(authorization)
+ if s['role']!='player':err('학생 계정이 필요합니다.',403)
+ if b.asset not in AMAP:err('상품을 찾을 수 없습니다.',404)
+ if len(b.thesis.strip())<5 or len(b.risk.strip())<2:err('예상과 걱정거리를 구체적으로 적어주세요.')
+ with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
+  if r['phase']!='trading':err('새 투자 가설은 거래일 중에 기록할 수 있어요. 기존 기록의 돌아보기는 언제든 가능합니다.')
+  ids=validate_evidence(c,s['room_id'],r['day'],b.evidence_ids)
+  cur=c.execute('INSERT INTO investment_notes(room_id,player_id,day,asset,thesis,risk,horizon,evidence_ids,created) VALUES(?,?,?,?,?,?,?,?,?)',
+   (s['room_id'],s['player_id'],r['day'],b.asset,b.thesis.strip(),b.risk.strip(),b.horizon.strip(),json.dumps(ids),now()))
+ return {'ok':True,'id':cur.lastrowid}
+
+class ReflectIn(BaseModel):
+ reflection:str=Field(min_length=5,max_length=1000)
+
+@app.patch('/api/notes/{nid}')
+def reflect_note(nid:int,b:ReflectIn,authorization:str|None=Header(None)):
+ s=session(authorization)
+ if s['role']!='player':err('학생 계정이 필요합니다.',403)
+ if len(b.reflection.strip())<5:err('돌아보기를 5자 이상 적어주세요.')
+ with conn() as c:
+  cur=c.execute('UPDATE investment_notes SET reflection=? WHERE id=? AND player_id=? AND room_id=?',
+                (b.reflection.strip(),nid,s['player_id'],s['room_id']))
+  if cur.rowcount!=1:err('기록을 찾을 수 없습니다.',404)
+ return {'ok':True}
+
+@lru_cache(maxsize=1)
+def demo_state():
+ """A read-only, in-memory classroom. Never creates rooms or students in the live database."""
+ c=sqlite3.connect(':memory:');c.row_factory=sqlite3.Row
+ try:
+  c.executescript('''
+   CREATE TABLE news(id INTEGER PRIMARY KEY,room_id INTEGER,day INTEGER,title TEXT,body TEXT,sector TEXT,impact REAL DEFAULT 0,active INTEGER DEFAULT 1);
+   CREATE TABLE orders(id INTEGER PRIMARY KEY);
+   CREATE TABLE prices(room_id INTEGER,day INTEGER,asset TEXT,price INTEGER,change REAL DEFAULT 0,open_price INTEGER,high_price INTEGER,low_price INTEGER);
+  ''')
+  engine.initialize_schema(c)
+  seed=62171;rid=1
+  c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
+  engine.publish_news(c,rid,1,seed,'neutral',ASSETS)
+  for day in range(2,7):
+   engine.evolve_businesses(c,rid,day,seed,ASSETS)
+   engine.resolve_events(c,rid,day,seed,ASSETS)
+   reactions=engine.release_earnings(c,rid,day,seed,ASSETS)
+   generate_prices(c,rid,day,seed,reactions)
+   engine.publish_news(c,rid,day,seed,'neutral',ASSETS)
+  price_map={x['asset']:x for x in rows(c,'SELECT asset,price,change FROM prices WHERE day=6')}
+  assets=[{**a,**price_map[a['id']]} for a in ASSETS]
+  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens FROM news ORDER BY day DESC,id DESC')
+  for n in news:n['related_assets']=json.loads(n['related_assets'])
+  holdings=[{'asset':'HBEL','qty':2,'cost':20000},{'asset':'GRTB','qty':3,'cost':13800},{'asset':'MKT','qty':2,'cost':10000}]
+  net=56200+sum(h['qty']*price_map[h['asset']]['price'] for h in holdings)
+  histories={a['id']:rows(c,'SELECT day,price,change,open_price AS open,high_price AS high,low_price AS low,price AS close FROM prices WHERE asset=? ORDER BY day',(a['id'],)) for a in ASSETS}
+  for bars in histories.values():
+   for bar in bars:
+    for key in ('open','high','low'):bar[key]=bar[key] or bar['price']
+    bar['reconstructed']=False
+  return {'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral'},
+   'assets':assets,'news':news,'players_count':6,'player':{'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
+   'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
+   'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
+   'histories':histories,**engine.public_data(c,rid,6)}
+ finally:c.close()
+
+@app.get('/api/demo')
+def demo():return demo_state()
