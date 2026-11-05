@@ -64,19 +64,21 @@ def test_evidence_immediate_trade_ready_and_reflection(school):
     order = {'asset': 'HBEL', 'side': 'buy', 'qty': 2, 'reason': '계약과 이익률을 비교했어요', 'evidence_ids': [news_id]}
     assert c.post('/api/orders', headers=learner, json=order).status_code == 200
     after = c.get('/api/state', headers=learner).json()
-    assert after['player']['cash'] == 80000
+    assert after['player']['cash'] == 79997
     assert after['holdings'][0]['qty'] == 2
-    assert after['player']['net'] == 100000
+    assert after['player']['net'] == 99997
     assert after['learning']['read_count'] == 1
     assert after['learning']['evidence_trades'] == 1
     note = c.post('/api/notes', headers=learner, json={'asset': 'HBEL', 'thesis': '실제 납품으로 이어질 것 같다', 'risk': '원가 상승', 'evidence_ids': [news_id]}).json()
     assert note['id']
     assert c.patch(f'/api/notes/{note["id"]}', headers=learner, json={'reflection': '매출뿐 아니라 이익률도 확인해야 한다'}).status_code == 200
     assert c.post('/api/day/complete', headers=learner).status_code == 200
-    assert c.post('/api/orders', headers=learner, json=order).status_code == 400
+    assert c.post('/api/orders', headers=learner, json=order).json()['selection_resumed'] is True
+    assert c.get('/api/state', headers=learner).json()['player']['day_ready'] is False
+    assert c.post('/api/day/complete', headers=learner).status_code == 200
     admin = c.get('/api/state', headers=teacher).json()
     assert admin['all_ready'] is True
-    assert admin['participants'][0]['note_count'] == 1
+    assert admin['participants'][0]['note_count'] == 3
     assert admin['participants'][0]['reflection_count'] == 1
     assert c.post('/api/day/reopen', headers=learner).status_code == 200
     assert c.post('/api/orders', headers=learner, json={**order, 'side': 'sell', 'qty': 1}).status_code == 200
@@ -104,7 +106,7 @@ def test_concurrent_orders_cannot_overspend(school):
         results = sorted(pool.map(buy, range(2)))
     assert results == [200, 400]
     s = c.get('/api/state', headers=learner).json()
-    assert s['player']['cash'] == 20000
+    assert s['player']['cash'] == 19988
     assert s['holdings'][0]['qty'] == 8
 
 

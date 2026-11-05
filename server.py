@@ -60,6 +60,13 @@ for a in ASSETS:
  a['description']=COMPANY_DESCRIPTIONS.get(a['id'], '여러 기업에 분산 투자하는 상품입니다.' if a['type']=='etf' else '가격과 위험이 변할 수 있는 가상 금융상품입니다.')
 
 AMAP={a['id']:a for a in ASSETS}
+# 0.015% per fill, integer half-up rounding, at least 1 game won.
+# A common teaching rate for traded assets; deposits and taxes are excluded.
+FEE_POLICY={'rate':0.00015,'percent':0.015,'minimum':1,'rounding':'half_up','numerator':15,'denominator':100000}
+def trading_fee(gross):return max(1,(gross*15+50000)//100000)
+def paid_fees(c,pid):
+ return -one(c,"SELECT COALESCE(SUM(amount),0) n FROM ledgers WHERE player_id=? AND kind='fee'",(pid,))['n']
+
 
 @contextmanager
 def conn():
@@ -99,6 +106,11 @@ def init():
   if 'mood' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
   engine.initialize_schema(c)
+  if 'fee' not in {row[1] for row in c.execute('PRAGMA table_info(orders)')}:
+   c.execute('ALTER TABLE orders ADD COLUMN fee INTEGER NOT NULL DEFAULT 0')
+  if 'order_id' not in {row[1] for row in c.execute('PRAGMA table_info(investment_notes)')}:
+   c.execute('ALTER TABLE investment_notes ADD COLUMN order_id INTEGER')
+  c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_note_order ON investment_notes(order_id) WHERE order_id IS NOT NULL')
   c.execute('CREATE INDEX IF NOT EXISTS idx_activity_orders ON orders(room_id,status,filled_day)')
   for existing in c.execute('SELECT id,seed,day FROM rooms').fetchall():
    engine.ensure_room(c,existing['id'],existing['seed'],existing['day'],ASSETS)
@@ -158,6 +170,8 @@ class OrderIn(BaseModel):
  side:str
  qty:int=Field(ge=1,le=100000)
  reason:str=Field(min_length=2,max_length=500)
+ expected_day:int|None=Field(default=None,ge=1,le=24)
+ expected_price:int|None=Field(default=None,ge=1)
  evidence_ids:list[int]=Field(default_factory=list,max_length=5)
 class DepositIn(BaseModel): principal:int=Field(ge=1000,le=100000000); term:int
 class NewsIn(BaseModel): title:str=Field(min_length=2,max_length=120); body:str=Field(min_length=2,max_length=400); sector:str='전체'; impact:float=Field(default=0,ge=-12,le=12)
@@ -168,7 +182,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'7.0-horizons'}
+ return {'ok': True,'version':'9.0-classroom-flow'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -239,6 +253,7 @@ def state(authorization:str|None=Header(None)):
   out={'room':r,'role':s['role'],'assets':[{**a,**price_map.get(a['id'],{})} for a in ASSETS],
        'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
+  out['fee_policy']=FEE_POLICY
   out.update(engine.public_data(c,r['id'],r['day']))
   for n in out['news']:
    n['related_assets']=json.loads(n['related_assets'])
@@ -247,8 +262,9 @@ def state(authorization:str|None=Header(None)):
    pid=s['player_id']; p=dict(one(c,'SELECT id,name,cash FROM players WHERE id=?',(pid,)))
    holdings=rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,))
    deposits=rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))
-   orders=rows(c,'SELECT id,asset,side,qty,price,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
+   orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
    out.update(learning_data(c,pid,r['id']))
+   p['fees_paid']=paid_fees(c,pid)
    p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],pid,r['day'])))
    p['net']=snapshot_value(c,pid,r['id'],r['day']); p['profit']=p['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
    out.update(player=p,holdings=holdings,deposits=deposits,orders=orders,
@@ -257,6 +273,7 @@ def state(authorization:str|None=Header(None)):
   else:
    out['participants']=rows(c,'SELECT id,name,cash FROM players WHERE room_id=? ORDER BY id',(r['id'],))
    for p in out['participants']:
+    p['fees_paid']=paid_fees(c,p['id'])
     p['net']=snapshot_value(c,p['id'],r['id'],r['day'])
     p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],p['id'],r['day'])))
     p.update(learning_summary(c,p['id']))
@@ -264,7 +281,7 @@ def state(authorization:str|None=Header(None)):
    out['ready_count']=sum(p['day_ready'] for p in out['participants'])
    out['all_ready']=bool(out['participants']) and out['ready_count']==len(out['participants'])
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
-   out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
+   out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.price,o.fee,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
   out.update(guides.public_guides(out,guides.market_activity(c,r['id'],r['day'])))
   return out
 @app.get('/api/admin/student/{pid}')
@@ -276,11 +293,13 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
   p=one(c,'SELECT id,name,cash FROM players WHERE id=? AND room_id=?',(pid,s['room_id']))
   if not p:err('해당 학생을 찾을 수 없습니다.',404)
   player=dict(p)
+  player['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],pid,r['day'])))
+  player['fees_paid']=paid_fees(c,pid)
   player['net']=snapshot_value(c,pid,r['id'],r['day'])
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
   return {**learning_data(c,pid,r['id']),'player':player,'holdings':rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,)),
     'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
-    'orders':rows(c,'SELECT id,asset,side,qty,price,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
+    'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
     'values':rows(c,'SELECT day,net,cash FROM daily_values WHERE player_id=? ORDER BY day',(pid,))}
 
@@ -330,28 +349,33 @@ def place_order(b:OrderIn,authorization:str|None=Header(None)):
   c.execute('BEGIN IMMEDIATE')
   rid=s['room_id'];pid=s['player_id'];r=one(c,'SELECT * FROM rooms WHERE id=?',(rid,))
   if r['phase']!='trading':err('현재 주문 가능한 상태가 아닙니다.')
-  if one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(rid,pid,r['day'])):err('오늘 선택을 완료했어요. 거래하려면 선택 완료를 취소하세요.')
   evidence=validate_evidence(c,rid,r['day'],b.evidence_ids)
   if len(b.reason.strip())<2:err('투자 이유를 2자 이상 적어주세요.')
   price=one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,r['day'],b.asset))['price'];value=price*b.qty
+  if (b.expected_day is not None and b.expected_day!=r['day']) or (b.expected_price is not None and b.expected_price!=price):err('거래일이나 가격이 바뀌었습니다. 새 결제 금액을 확인한 뒤 다시 거래하세요.',409)
+  fee=trading_fee(value);settlement=value+fee if b.side=='buy' else value-fee
   h=one(c,'SELECT * FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
   cash=one(c,'SELECT cash FROM players WHERE id=?',(pid,))['cash']
   if b.side=='buy':
-   if value>cash:err('현금이 부족합니다.')
-   c.execute('UPDATE players SET cash=cash-? WHERE id=?',(value,pid))
-   if h:c.execute('UPDATE holdings SET qty=qty+?,cost=cost+? WHERE player_id=? AND asset=?',(b.qty,value,pid,b.asset))
-   else:c.execute('INSERT INTO holdings(player_id,asset,qty,cost) VALUES(?,?,?,?)',(pid,b.asset,b.qty,value))
+   if settlement>cash:err('수수료를 포함한 결제 금액보다 현금이 부족합니다.')
+   c.execute('UPDATE players SET cash=cash-? WHERE id=?',(settlement,pid))
+   if h:c.execute('UPDATE holdings SET qty=qty+?,cost=cost+? WHERE player_id=? AND asset=?',(b.qty,settlement,pid,b.asset))
+   else:c.execute('INSERT INTO holdings(player_id,asset,qty,cost) VALUES(?,?,?,?)',(pid,b.asset,b.qty,settlement))
   else:
    if not h or b.qty>h['qty']:err('매도할 수량이 부족합니다.')
-   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(value,pid))
+   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(settlement,pid))
    remaining=h['qty']-b.qty;cost=round(h['cost']*remaining/h['qty'])
    if remaining:c.execute('UPDATE holdings SET qty=?,cost=? WHERE player_id=? AND asset=?',(remaining,cost,pid,b.asset))
    else:c.execute('DELETE FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
   cur=c.execute('INSERT INTO orders(room_id,player_id,asset,side,qty,price,status,reason,created,filled_day,evidence_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(rid,pid,b.asset,b.side,b.qty,price,'filled',b.reason.strip(),now(),r['day'],json.dumps(evidence)))
+  c.execute('UPDATE orders SET fee=? WHERE id=?',(fee,cur.lastrowid))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,pid,r['day'],'trade',value*(-1 if b.side=='buy' else 1),f"{b.asset} {'매수' if b.side=='buy' else '매도'} {b.qty}주 (즉시 체결)"))
+  c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,pid,r['day'],'fee',-fee,f"{AMAP[b.asset]['name']} {'매수' if b.side=='buy' else '매도'} 수수료 (0.015%)"))
+  selection_resumed=resume_selection(c,s,r['day'])
+  note_id=ensure_order_note(c,cur.lastrowid,rid,pid)
   record_all(c,rid,r['day'])
   log(c,rid,r['day'],'trade',f'{pid}번 학생 {b.asset} {b.side} {b.qty}주 즉시 체결')
- return {'ok':True,'order_id':cur.lastrowid,'filled':True,'price':price,'message':'거래가 즉시 체결되어 내 자산에 반영됐습니다.'}
+ return {'ok':True,'order_id':cur.lastrowid,'filled':True,'price':price,'fee':fee,'settlement':settlement,'note_id':note_id,'selection_resumed':selection_resumed,'message':'거래와 판단 이유를 함께 저장했어요.'}
 
 @app.post('/api/orders/{oid}/cancel')
 def cancel_order(oid:int,authorization:str|None=Header(None)):
@@ -373,15 +397,15 @@ def deposit(b:DepositIn,authorization:str|None=Header(None)):
   c.execute('BEGIN IMMEDIATE')
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading' or r['day']+b.term-1>24:err('현재 가입할 수 없는 만기입니다.')
-  if one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(s['room_id'],s['player_id'],r['day'])):err('오늘 선택을 완료했어요. 예금 가입 전 선택 완료를 취소하세요.')
   pending=one(c,"SELECT COALESCE(SUM(qty*price),0) n FROM orders WHERE player_id=? AND side='buy' AND status='pending'",(s['player_id'],))['n']
   p=one(c,'SELECT cash FROM players WHERE id=?',(s['player_id'],))
   if b.principal>p['cash']-pending:err('사용 가능한 현금이 부족합니다.')
   c.execute('UPDATE players SET cash=cash-? WHERE id=?',(b.principal,s['player_id']))
   c.execute('INSERT INTO deposits(player_id,room_id,principal,start_day,term,rate) VALUES(?,?,?,?,?,?)',(s['player_id'],s['room_id'],b.principal,r['day'],b.term,0.1*b.term/24))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(s['room_id'],s['player_id'],r['day'],'deposit',-b.principal,f'{b.term}일 예금 가입'))
+  selection_resumed=resume_selection(c,s,r['day'])
   record_all(c,s['room_id'],r['day'])
- return {'ok':True}
+ return {'ok':True,'selection_resumed':selection_resumed}
 @app.post('/api/deposits/{did}/close')
 def close_deposit(did:int,authorization:str|None=Header(None)):
  s=session(authorization)
@@ -392,57 +416,61 @@ def close_deposit(did:int,authorization:str|None=Header(None)):
   if not d:err('해지할 수 없는 예금입니다.')
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('거래 가능한 시간에 해지하세요.')
-  if one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(s['room_id'],s['player_id'],r['day'])):err('오늘 선택 완료를 취소한 뒤 예금을 해지하세요.')
   elapsed=max(0,r['day']-d['start_day'])
   ratio=0 if elapsed==0 else 0.5*min(1,elapsed/d['term'])
   paid=d['principal']+round(d['principal']*d['rate']*ratio)
   c.execute("UPDATE deposits SET status='early',paid=? WHERE id=?",(paid,did))
   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,s['player_id']))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(s['room_id'],s['player_id'],r['day'],'deposit',paid,'예금 중도해지'))
+  selection_resumed=resume_selection(c,s,r['day'])
   record_all(c,s['room_id'],r['day'])
- return {'ok':True,'paid':paid}
+ return {'ok':True,'paid':paid,'selection_resumed':selection_resumed}
+
+def close_trading_day(c,r):
+ rid=r['id']
+ if r['phase']!='trading':err('이미 마감한 날입니다.')
+ pending=rows(c,"SELECT * FROM orders WHERE room_id=? AND status='pending' ORDER BY id",(rid,))
+ filled=0; rejected=0
+ for o in pending:
+  price=one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,r['day'],o['asset']))['price']; value=price*o['qty']
+  h=one(c,'SELECT * FROM holdings WHERE player_id=? AND asset=?',(o['player_id'],o['asset']))
+  p=one(c,'SELECT cash FROM players WHERE id=?',(o['player_id'],))
+  if o['side']=='buy' and p['cash']>=value:
+   c.execute('UPDATE players SET cash=cash-? WHERE id=?',(value,o['player_id']))
+   if h:c.execute('UPDATE holdings SET qty=qty+?,cost=cost+? WHERE player_id=? AND asset=?',(o['qty'],value,o['player_id'],o['asset']))
+   else:c.execute('INSERT INTO holdings VALUES(?,?,?,?)',(o['player_id'],o['asset'],o['qty'],value))
+  elif o['side']=='sell' and h and h['qty']>=o['qty']:
+   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(value,o['player_id']))
+   remaining=h['qty']-o['qty']; cost=round(h['cost']*remaining/h['qty'])
+   if remaining:c.execute('UPDATE holdings SET qty=?,cost=? WHERE player_id=? AND asset=?',(remaining,cost,o['player_id'],o['asset']))
+   else:c.execute('DELETE FROM holdings WHERE player_id=? AND asset=?',(o['player_id'],o['asset']))
+  else:
+   c.execute("UPDATE orders SET status='rejected' WHERE id=?",(o['id'],));rejected+=1;continue
+  c.execute("UPDATE orders SET status='filled',filled_day=? WHERE id=?",(r['day'],o['id']))
+  c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,o['player_id'],r['day'],'trade',value*(-1 if o['side']=='buy' else 1),f"{o['asset']} {'매수' if o['side']=='buy' else '매도'} {o['qty']}주"))
+  filled+=1
+ c.execute("UPDATE rooms SET phase=? WHERE id=?",('finished' if r['day']==24 else 'closed',rid))
+ # Bond coupons paid on the final day; simulate annual coupon on holdings.
+ if r['day']==24:
+  for p in rows(c,'SELECT id FROM players WHERE room_id=?',(rid,)):
+   coupon=0
+   for h in rows(c,'SELECT * FROM holdings WHERE player_id=?',(p['id'],)):
+    a=AMAP[h['asset']]
+    if a['type']=='bond':coupon+=round(10000*a['yield']*h['qty'])
+   if coupon:
+    c.execute('UPDATE players SET cash=cash+? WHERE id=?',(coupon,p['id']))
+    c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,p['id'],24,'interest',coupon,'연말 채권 이자'))
+ record_all(c,rid,r['day'])
+ log(c,rid,r['day'],'close',f'마감: 체결 {filled}건, 거절 {rejected}건')
+ return {'ok':True,'filled':filled,'rejected':rejected}
 
 @app.post('/api/admin/close')
 def close_market(authorization:str|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
-  rid=s['room_id'];r=one(c,'SELECT * FROM rooms WHERE id=?',(rid,))
-  if r['phase']!='trading':err('이미 마감한 날입니다.')
-  pending=rows(c,"SELECT * FROM orders WHERE room_id=? AND status='pending' ORDER BY id",(rid,))
-  filled=0; rejected=0
-  for o in pending:
-   price=one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,r['day'],o['asset']))['price']; value=price*o['qty']
-   h=one(c,'SELECT * FROM holdings WHERE player_id=? AND asset=?',(o['player_id'],o['asset']))
-   p=one(c,'SELECT cash FROM players WHERE id=?',(o['player_id'],))
-   if o['side']=='buy' and p['cash']>=value:
-    c.execute('UPDATE players SET cash=cash-? WHERE id=?',(value,o['player_id']))
-    if h:c.execute('UPDATE holdings SET qty=qty+?,cost=cost+? WHERE player_id=? AND asset=?',(o['qty'],value,o['player_id'],o['asset']))
-    else:c.execute('INSERT INTO holdings VALUES(?,?,?,?)',(o['player_id'],o['asset'],o['qty'],value))
-   elif o['side']=='sell' and h and h['qty']>=o['qty']:
-    c.execute('UPDATE players SET cash=cash+? WHERE id=?',(value,o['player_id']))
-    remaining=h['qty']-o['qty']; cost=round(h['cost']*remaining/h['qty'])
-    if remaining:c.execute('UPDATE holdings SET qty=?,cost=? WHERE player_id=? AND asset=?',(remaining,cost,o['player_id'],o['asset']))
-    else:c.execute('DELETE FROM holdings WHERE player_id=? AND asset=?',(o['player_id'],o['asset']))
-   else:
-    c.execute("UPDATE orders SET status='rejected' WHERE id=?",(o['id'],));rejected+=1;continue
-   c.execute("UPDATE orders SET status='filled',filled_day=? WHERE id=?",(r['day'],o['id']))
-   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,o['player_id'],r['day'],'trade',value*(-1 if o['side']=='buy' else 1),f"{o['asset']} {'매수' if o['side']=='buy' else '매도'} {o['qty']}주"))
-   filled+=1
-  c.execute("UPDATE rooms SET phase=? WHERE id=?",('finished' if r['day']==24 else 'closed',rid))
-  # Bond coupons paid on the final day; simulate annual coupon on holdings.
-  if r['day']==24:
-   for p in rows(c,'SELECT id FROM players WHERE room_id=?',(rid,)):
-    coupon=0
-    for h in rows(c,'SELECT * FROM holdings WHERE player_id=?',(p['id'],)):
-     a=AMAP[h['asset']]
-     if a['type']=='bond':coupon+=round(10000*a['yield']*h['qty'])
-    if coupon:
-     c.execute('UPDATE players SET cash=cash+? WHERE id=?',(coupon,p['id']))
-     c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,p['id'],24,'interest',coupon,'연말 채권 이자'))
-  record_all(c,rid,r['day'])
-  log(c,rid,r['day'],'close',f'마감: 체결 {filled}건, 거절 {rejected}건')
- return {'ok':True,'filled':filled,'rejected':rejected}
+  r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  return close_trading_day(c,r)
 
 def generate_prices(c,rid,day,seed,earnings=None):
  rng=random.Random(seed+day*10007)
@@ -497,29 +525,52 @@ def generate_prices(c,rid,day,seed,earnings=None):
   low=max(1,min(opening,price)-wiggle)
   c.execute('INSERT INTO prices(room_id,day,asset,price,change,open_price,high_price,low_price) VALUES(?,?,?,?,?,?,?,?)',(rid,day,asset,price,round(change,4),opening,high,low))
 
+def start_trading_day(c,r):
+ rid=r['id']
+ if r['phase']!='closed':err('먼저 하루 주문을 마감하세요.')
+ if r['day']>=24:err('게임이 종료되었습니다.')
+ day=r['day']+1
+ engine.evolve_businesses(c,rid,day,r['seed'],ASSETS)
+ engine.resolve_events(c,rid,day,r['seed'],ASSETS)
+ earnings=engine.release_earnings(c,rid,day,r['seed'],ASSETS)
+ generate_prices(c,rid,day,r['seed'],earnings)
+ c.execute("UPDATE rooms SET day=?,phase='trading' WHERE id=?",(day,rid))
+ for d in rows(c,"SELECT * FROM deposits WHERE room_id=? AND status='active' AND start_day+term-1<=?",(rid,day)):
+  paid=d['principal']+round(d['principal']*d['rate'])
+  c.execute("UPDATE deposits SET status='matured',paid=? WHERE id=?",(paid,d['id']))
+  c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,d['player_id']))
+  c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,d['player_id'],day,'interest',paid,f"{d['term']}일 예금 만기 수령"))
+ publish_dynamic_news(c,rid,day,r['seed'],r['mood'])
+ record_all(c,rid,day)
+ log(c,rid,day,'next',f'{day}일차 시작 및 가격 갱신')
+ return {'ok':True,'day':day,'phase':'trading'}
+
 @app.post('/api/admin/next')
 def next_day(authorization:str|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
-  rid=s['room_id'];r=one(c,'SELECT * FROM rooms WHERE id=?',(rid,))
-  if r['phase']!='closed':err('먼저 하루 주문을 마감하세요.')
-  if r['day']>=24:err('게임이 종료되었습니다.')
-  day=r['day']+1
-  engine.evolve_businesses(c,rid,day,r['seed'],ASSETS)
-  engine.resolve_events(c,rid,day,r['seed'],ASSETS)
-  earnings=engine.release_earnings(c,rid,day,r['seed'],ASSETS)
-  generate_prices(c,rid,day,r['seed'],earnings)
-  c.execute("UPDATE rooms SET day=?,phase='trading' WHERE id=?",(day,rid))
-  for d in rows(c,"SELECT * FROM deposits WHERE room_id=? AND status='active' AND start_day+term-1<=?",(rid,day)):
-   paid=d['principal']+round(d['principal']*d['rate'])
-   c.execute("UPDATE deposits SET status='matured',paid=? WHERE id=?",(paid,d['id']))
-   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,d['player_id']))
-   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,d['player_id'],day,'interest',paid,f"{d['term']}일 예금 만기 수령"))
-  publish_dynamic_news(c,rid,day,r['seed'],r['mood'])
-  record_all(c,rid,day)
-  log(c,rid,day,'next',f'{day}일차 시작 및 가격 갱신')
- return {'ok':True,'day':day}
+  r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  return start_trading_day(c,r)
+
+class AdvanceIn(BaseModel):
+ expected_day:int=Field(ge=1,le=24)
+ expected_phase:str=Field(pattern='^(trading|closed)$')
+
+@app.post('/api/admin/advance')
+def advance_day(b:AdvanceIn,authorization:str|None=Header(None)):
+ s=admin(authorization)
+ with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  if r['day']!=b.expected_day or r['phase']!=b.expected_phase:
+   err('수업 진행 상태가 바뀌었습니다. 현재 화면을 확인한 뒤 다시 진행하세요.',409)
+  if r['phase']=='trading':
+   close_trading_day(c,r)
+   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  if r['phase']=='finished':return {'ok':True,'day':24,'phase':'finished'}
+  return start_trading_day(c,r)
+
 class MoodIn(BaseModel):
  mood:str
 
@@ -561,7 +612,29 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None)):
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name)}
+def health():return {'ok':True,'db':str(DB.name),'version':'9.0-classroom-flow'}
+
+# Completion follows actual activity; a failed trade leaves the signal unchanged.
+def resume_selection(c,s,day):
+ cur=c.execute('DELETE FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(s['room_id'],s['player_id'],day))
+ return cur.rowcount>0
+
+def ensure_order_note(c,oid,rid,pid):
+ existing=one(c,'SELECT id FROM investment_notes WHERE order_id=? AND room_id=? AND player_id=?',(oid,rid,pid))
+ if existing:return existing['id']
+ o=one(c,"SELECT * FROM orders WHERE id=? AND room_id=? AND player_id=? AND status='filled'",(oid,rid,pid))
+ if not o:err('거래 기록을 찾을 수 없습니다.',404)
+ cur=c.execute('INSERT INTO investment_notes(room_id,player_id,day,asset,thesis,risk,horizon,evidence_ids,created,order_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
+  (rid,pid,o['filled_day'],o['asset'],o['reason'],'','다음 실적 발표까지',o['evidence_ids'],o['created'],oid))
+ return cur.lastrowid
+
+@app.post('/api/orders/{oid}/note')
+def trade_note(oid:int,authorization:str|None=Header(None)):
+ s=session(authorization)
+ if s['role']!='player':err('학생 계정이 필요합니다.',403)
+ with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  return {'ok':True,'id':ensure_order_note(c,oid,s['room_id'],s['player_id'])}
 
 # Reading, evidence and reflection are separate from financial performance.
 def validate_evidence(c,rid,day,ids):
@@ -579,8 +652,9 @@ def learning_summary(c,pid):
   'reflection_count':one(c,"SELECT COUNT(*) n FROM investment_notes WHERE player_id=? AND reflection!=''",(pid,))['n']}
 
 def learning_data(c,pid,rid):
- notes=rows(c,'''SELECT n.id,n.day,n.asset,n.thesis,n.risk,n.horizon,n.evidence_ids,n.reflection,n.created,
-                       p.price AS entry_price FROM investment_notes n LEFT JOIN prices p
+ notes=rows(c,'''SELECT n.id,n.day,n.asset,n.thesis,n.risk,n.horizon,n.evidence_ids,n.reflection,n.created,n.order_id,
+                       o.side AS order_side,o.qty AS order_qty,o.price AS order_price,o.fee AS order_fee,
+                       p.price AS entry_price FROM investment_notes n LEFT JOIN orders o ON o.id=n.order_id LEFT JOIN prices p
                        ON p.room_id=n.room_id AND p.day=n.day AND p.asset=n.asset
                        WHERE n.player_id=? AND n.room_id=? ORDER BY n.id DESC LIMIT 100''',(pid,rid))
  for n in notes:n['evidence_ids']=json.loads(n['evidence_ids'])
@@ -615,7 +689,7 @@ def read_article(nid:int,authorization:str|None=Header(None)):
 class NoteIn(BaseModel):
  asset:str
  thesis:str=Field(min_length=5,max_length=700)
- risk:str=Field(min_length=2,max_length=500)
+ risk:str=Field(default='',max_length=500)
  horizon:str=Field(default='다음 실적 발표까지',min_length=2,max_length=60)
  evidence_ids:list[int]=Field(default_factory=list,max_length=5)
 
@@ -624,7 +698,7 @@ def create_note(b:NoteIn,authorization:str|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if b.asset not in AMAP:err('상품을 찾을 수 없습니다.',404)
- if len(b.thesis.strip())<5 or len(b.risk.strip())<2:err('예상과 걱정거리를 구체적으로 적어주세요.')
+ if len(b.thesis.strip())<5:err('어떤 생각인지 5자 이상 적어주세요.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
@@ -636,6 +710,8 @@ def create_note(b:NoteIn,authorization:str|None=Header(None)):
 
 class ReflectIn(BaseModel):
  reflection:str=Field(min_length=5,max_length=1000)
+ risk:str|None=Field(default=None,max_length=500)
+ horizon:str|None=Field(default=None,min_length=2,max_length=60)
 
 @app.patch('/api/notes/{nid}')
 def reflect_note(nid:int,b:ReflectIn,authorization:str|None=Header(None)):
@@ -643,9 +719,12 @@ def reflect_note(nid:int,b:ReflectIn,authorization:str|None=Header(None)):
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if len(b.reflection.strip())<5:err('돌아보기를 5자 이상 적어주세요.')
  with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
   cur=c.execute('UPDATE investment_notes SET reflection=? WHERE id=? AND player_id=? AND room_id=?',
                 (b.reflection.strip(),nid,s['player_id'],s['room_id']))
   if cur.rowcount!=1:err('기록을 찾을 수 없습니다.',404)
+  if b.risk is not None:c.execute('UPDATE investment_notes SET risk=? WHERE id=?',(b.risk.strip(),nid))
+  if b.horizon is not None:c.execute('UPDATE investment_notes SET horizon=? WHERE id=?',(b.horizon.strip(),nid))
  return {'ok':True}
 
 @lru_cache(maxsize=1)
@@ -682,7 +761,7 @@ def demo_state():
     for key in ('open','high','low'):bar[key]=bar[key] or bar['price']
     bar['reconstructed']=False
   out={'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral'},
-   'assets':assets,'news':news,'players_count':6,'player':{'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
+   'fee_policy':FEE_POLICY,'assets':assets,'news':news,'players_count':6,'player':{'fees_paid':0,'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
    'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
    'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
    'histories':histories,**engine.public_data(c,rid,6)}
