@@ -100,6 +100,7 @@ def init():
   engine.initialize_schema(c)
   for existing in c.execute('SELECT id,seed,day FROM rooms').fetchall():
    engine.ensure_room(c,existing['id'],existing['seed'],existing['day'],ASSETS)
+   engine.record_business_day(c,existing['id'],existing['day'],ASSETS)
   # Existing games keep their closing prices and balances; financial baselines are added lazily.
 init()
 
@@ -165,7 +166,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'6.0-research'}
+ return {'ok': True,'version':'7.0-horizons'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -234,7 +235,7 @@ def state(authorization:str|None=Header(None)):
   prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   price_map={x['asset']:x for x in prices}
   out={'room':r,'role':s['role'],'assets':[{**a,**price_map.get(a['id'],{})} for a in ASSETS],
-       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 400',(r['id'],r['day'])),
+       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
   out.update(engine.public_data(c,r['id'],r['day']))
   for n in out['news']:n['related_assets']=json.loads(n['related_assets'])
@@ -388,7 +389,7 @@ def close_deposit(did:int,authorization:str|None=Header(None)):
   if r['phase']!='trading':err('거래 가능한 시간에 해지하세요.')
   if one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(s['room_id'],s['player_id'],r['day'])):err('오늘 선택 완료를 취소한 뒤 예금을 해지하세요.')
   elapsed=max(0,r['day']-d['start_day'])
-  ratio=0.15 if elapsed==0 else 0.5*min(1,elapsed/d['term'])
+  ratio=0 if elapsed==0 else 0.5*min(1,elapsed/d['term'])
   paid=d['principal']+round(d['principal']*d['rate']*ratio)
   c.execute("UPDATE deposits SET status='early',paid=? WHERE id=?",(paid,did))
   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,s['player_id']))
@@ -442,16 +443,21 @@ def generate_prices(c,rid,day,seed,earnings=None):
  rng=random.Random(seed+day*10007)
  previous={p['asset']:p['price'] for p in rows(c,'SELECT asset,price FROM prices WHERE room_id=? AND day=?',(rid,day-1))}
  effects=rows(c,'SELECT sector,impact,title FROM news WHERE room_id=? AND day=? AND active=1',(rid,day-1))
- market=rng.gauss(.2,1.2)
+ market=rng.gauss(0,1.5)
+ # A quarter-long common shock preserves meaningful market risk after diversification.
+ regime=random.Random(seed+((day-2)//6)*4721+16127).gauss(0,.72)
  sectors={s:rng.gauss(0,1.5) for s in ['기술','항공','식품','의료·제약','미래사업']}
  rets={}
  for a in ASSETS:
   id=a['id'];risk=a['risk'];old=previous[id]
   if a['type']=='stock':
-   vol={'stable':.65,'growth':1.5,'high':3.0}[risk]
+   vol={'stable':.85,'growth':1.9,'high':3.8}[risk]
    news=sum(e['impact'] for e in effects if e['sector'] in ('전체',a['sector'],id))
-   ret=market*0.45+sectors[a['sector']]*.5+news+(earnings or {}).get(id,0)+rng.gauss(0,vol)
-   cap={'stable':12,'growth':20,'high':35}[risk]
+   annual_carry=engine.MARKET_ANNUAL_CARRY+{'stable':-.02,'growth':.02,'high':.06}[risk]
+   carry=((1+annual_carry)**(1/engine.TRADING_INTERVALS)-1)*100
+   beta={'stable':.8,'growth':1,'high':1.15}[risk]
+   ret=carry+beta*(market+regime)+sectors[a['sector']]*.5+news+(earnings or {}).get(id,0)+rng.gauss(0,vol)
+   cap={'stable':7,'growth':12,'high':20}[risk]
    ret=max(-cap,min(cap,ret))
   elif a['type']=='gold':
    ret=max(-10,min(10,rng.gauss(0,1.7)-market*.25))
@@ -659,7 +665,7 @@ def demo_state():
    engine.publish_news(c,rid,day,seed,'neutral',ASSETS)
   price_map={x['asset']:x for x in rows(c,'SELECT asset,price,change FROM prices WHERE day=6')}
   assets=[{**a,**price_map[a['id']]} for a in ASSETS]
-  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens FROM news ORDER BY day DESC,id DESC')
+  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end FROM news ORDER BY day DESC,id DESC')
   for n in news:n['related_assets']=json.loads(n['related_assets'])
   holdings=[{'asset':'HBEL','qty':2,'cost':20000},{'asset':'GRTB','qty':3,'cost':13800},{'asset':'MKT','qty':2,'cost':10000}]
   net=56200+sum(h['qty']*price_map[h['asset']]['price'] for h in holdings)
