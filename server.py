@@ -3,11 +3,12 @@ import os, json, secrets, hashlib, sqlite3, random, math, datetime, io, base64
 from pathlib import Path
 from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import classroom_engine as engine
 import classroom_guides as guides
+import game_reset
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -106,6 +107,7 @@ def init():
   if 'mood' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
   engine.initialize_schema(c)
+  game_reset.initialize(c)
   if 'fee' not in {row[1] for row in c.execute('PRAGMA table_info(orders)')}:
    c.execute('ALTER TABLE orders ADD COLUMN fee INTEGER NOT NULL DEFAULT 0')
   if 'order_id' not in {row[1] for row in c.execute('PRAGMA table_info(investment_notes)')}:
@@ -182,7 +184,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'9.0-classroom-flow'}
+ return {'ok': True,'version':'10.0-new-game'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -246,7 +248,7 @@ def state(authorization:str|None=Header(None)):
  s=session(authorization)
  with conn() as c:
   c.execute('BEGIN')
-  r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood FROM rooms WHERE id=?',(s['room_id'],)))
+  r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood,generation FROM rooms WHERE id=?',(s['room_id'],)))
   engine.ensure_room(c,r['id'],one(c,'SELECT seed FROM rooms WHERE id=?',(r['id'],))['seed'],r['day'],ASSETS)
   prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   price_map={x['asset']:x for x in prices}
@@ -280,6 +282,7 @@ def state(authorization:str|None=Header(None)):
     p['pending']=one(c,"SELECT COUNT(*) n FROM orders WHERE player_id=? AND status='pending'",(p['id'],))['n']
    out['ready_count']=sum(p['day_ready'] for p in out['participants'])
    out['all_ready']=bool(out['participants']) and out['ready_count']==len(out['participants'])
+   out['reset_backup']=dict(backup) if (backup:=one(c,'SELECT id,created,from_day FROM game_reset_backups WHERE room_id=? ORDER BY created DESC,rowid DESC LIMIT 1',(r['id'],))) else None
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
    out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.price,o.fee,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
   out.update(guides.public_guides(out,guides.market_activity(c,r['id'],r['day'])))
@@ -304,22 +307,24 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
     'values':rows(c,'SELECT day,net,cash FROM daily_values WHERE player_id=? ORDER BY day',(pid,))}
 
 @app.post('/api/day/complete')
-def day_complete(authorization:str|None=Header(None)):
+def day_complete(authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('오늘은 선택 완료를 표시할 수 없습니다.')
   c.execute('INSERT OR IGNORE INTO day_ready(room_id,player_id,day,created) VALUES(?,?,?,?)',(s['room_id'],s['player_id'],r['day'],now()))
  return {'ok':True,'day_ready':True}
 
 @app.post('/api/day/reopen')
-def day_reopen(authorization:str|None=Header(None)):
+def day_reopen(authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('이미 장이 마감되었습니다.')
   c.execute('DELETE FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(s['room_id'],s['player_id'],r['day']))
@@ -341,12 +346,13 @@ def history(asset:str,authorization:str|None=Header(None)):
   return data
 
 @app.post('/api/orders')
-def place_order(b:OrderIn,authorization:str|None=Header(None)):
+def place_order(b:OrderIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if b.asset not in AMAP or b.side not in ('buy','sell'):err('주문 정보가 올바르지 않습니다.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   rid=s['room_id'];pid=s['player_id'];r=one(c,'SELECT * FROM rooms WHERE id=?',(rid,))
   if r['phase']!='trading':err('현재 주문 가능한 상태가 아닙니다.')
   evidence=validate_evidence(c,rid,r['day'],b.evidence_ids)
@@ -378,23 +384,25 @@ def place_order(b:OrderIn,authorization:str|None=Header(None)):
  return {'ok':True,'order_id':cur.lastrowid,'filled':True,'price':price,'fee':fee,'settlement':settlement,'note_id':note_id,'selection_resumed':selection_resumed,'message':'거래와 판단 이유를 함께 저장했어요.'}
 
 @app.post('/api/orders/{oid}/cancel')
-def cancel_order(oid:int,authorization:str|None=Header(None)):
+def cancel_order(oid:int,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('장 마감 후에는 취소할 수 없습니다.')
   cur=c.execute("UPDATE orders SET status='cancelled' WHERE id=? AND player_id=? AND status='pending'",(oid,s['player_id']))
   if cur.rowcount!=1:err('취소할 수 없는 주문입니다.')
  return {'ok':True}
 @app.post('/api/deposits')
-def deposit(b:DepositIn,authorization:str|None=Header(None)):
+def deposit(b:DepositIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if b.term not in (6,12,18,24):err('예금 기간이 올바르지 않습니다.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading' or r['day']+b.term-1>24:err('현재 가입할 수 없는 만기입니다.')
   pending=one(c,"SELECT COALESCE(SUM(qty*price),0) n FROM orders WHERE player_id=? AND side='buy' AND status='pending'",(s['player_id'],))['n']
@@ -407,11 +415,12 @@ def deposit(b:DepositIn,authorization:str|None=Header(None)):
   record_all(c,s['room_id'],r['day'])
  return {'ok':True,'selection_resumed':selection_resumed}
 @app.post('/api/deposits/{did}/close')
-def close_deposit(did:int,authorization:str|None=Header(None)):
+def close_deposit(did:int,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   d=one(c,"SELECT * FROM deposits WHERE id=? AND player_id=? AND status='active'",(did,s['player_id']))
   if not d:err('해지할 수 없는 예금입니다.')
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
@@ -465,10 +474,11 @@ def close_trading_day(c,r):
  return {'ok':True,'filled':filled,'rejected':rejected}
 
 @app.post('/api/admin/close')
-def close_market(authorization:str|None=Header(None)):
+def close_market(authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   return close_trading_day(c,r)
 
@@ -546,10 +556,11 @@ def start_trading_day(c,r):
  return {'ok':True,'day':day,'phase':'trading'}
 
 @app.post('/api/admin/next')
-def next_day(authorization:str|None=Header(None)):
+def next_day(authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   return start_trading_day(c,r)
 
@@ -558,10 +569,11 @@ class AdvanceIn(BaseModel):
  expected_phase:str=Field(pattern='^(trading|closed)$')
 
 @app.post('/api/admin/advance')
-def advance_day(b:AdvanceIn,authorization:str|None=Header(None)):
+def advance_day(b:AdvanceIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   if r['day']!=b.expected_day or r['phase']!=b.expected_phase:
    err('수업 진행 상태가 바뀌었습니다. 현재 화면을 확인한 뒤 다시 진행하세요.',409)
@@ -571,15 +583,47 @@ def advance_day(b:AdvanceIn,authorization:str|None=Header(None)):
   if r['phase']=='finished':return {'ok':True,'day':24,'phase':'finished'}
   return start_trading_day(c,r)
 
+def check_game_generation(c,s,expected):
+ current=one(c,'SELECT generation FROM rooms WHERE id=?',(s['room_id'],))['generation']
+ if (expected is None and current>0) or (expected is not None and expected!=current):
+  err('새 게임이 시작되었어요. 화면을 새로고침한 뒤 다시 선택하세요.',409)
+
+class ResetIn(BaseModel):
+ confirmation:str
+ expected_day:int=Field(ge=1,le=24)
+ expected_generation:int=Field(ge=0)
+
+@app.post('/api/admin/reset')
+def reset_game(b:ResetIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
+ s=admin(authorization)
+ if b.confirmation!='초기화':err('확인란에 초기화를 정확히 입력하세요.')
+ with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
+  r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  if r['day']!=b.expected_day or r['generation']!=b.expected_generation:
+   err('게임 진행 상태가 바뀌었습니다. 현재 화면을 확인한 뒤 다시 초기화하세요.',409)
+  result=game_reset.reset_room(c,r,ASSETS,now())
+ return result
+
+@app.get('/api/admin/reset-backup')
+def reset_backup(authorization:str|None=Header(None)):
+ s=admin(authorization)
+ with conn() as c:
+  backup=one(c,'SELECT id,snapshot FROM game_reset_backups WHERE room_id=? ORDER BY created DESC,rowid DESC LIMIT 1',(s['room_id'],))
+  if not backup:err('아직 초기화 백업이 없습니다.',404)
+  return JSONResponse(json.loads(backup['snapshot']),headers={'Content-Disposition':f'attachment; filename="haru-play-backup-{backup["id"][:8]}.json"','Cache-Control':'no-store'})
+
 class MoodIn(BaseModel):
  mood:str
 
 @app.post('/api/admin/mood')
-def set_mood(b:MoodIn,authorization:str|None=Header(None)):
+def set_mood(b:MoodIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=admin(authorization)
  if b.mood not in MOODS:err('긍정, 중립, 부정 중에서 선택하세요.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']=='finished':err('종료된 게임입니다.')
   c.execute('UPDATE rooms SET mood=? WHERE id=?',(b.mood,s['room_id']))
@@ -587,21 +631,23 @@ def set_mood(b:MoodIn,authorization:str|None=Header(None)):
  return {'ok':True,'mood':b.mood,'effective':'다음 거래일에 생성되는 뉴스부터'}
 
 @app.post('/api/admin/news')
-def add_news(b:NewsIn,authorization:str|None=Header(None)):
+def add_news(b:NewsIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=admin(authorization)
  if b.sector not in ['전체','기술','항공','식품','의료·제약','미래사업']+list(AMAP):err('잘못된 뉴스 대상입니다.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']=='finished':err('종료된 게임입니다.')
   c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,?)',(s['room_id'],r['day'],b.title,b.body,b.sector,b.impact))
   log(c,s['room_id'],r['day'],'news',f'{b.title} / {b.sector} / 다음날 영향 {b.impact:+g}%p')
  return {'ok':True}
 @app.post('/api/admin/cash')
-def edit_cash(b:CashEdit,authorization:str|None=Header(None)):
+def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=admin(authorization)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   p=one(c,'SELECT * FROM players WHERE id=? AND room_id=?',(b.player_id,s['room_id']))
   if not p:err('학생을 찾을 수 없습니다.')
   if p['cash']+b.amount<0:err('현금이 음수가 됩니다.')
@@ -612,7 +658,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None)):
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'9.0-classroom-flow'}
+def health():return {'ok':True,'db':str(DB.name),'version':'10.0-new-game'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -629,11 +675,12 @@ def ensure_order_note(c,oid,rid,pid):
  return cur.lastrowid
 
 @app.post('/api/orders/{oid}/note')
-def trade_note(oid:int,authorization:str|None=Header(None)):
+def trade_note(oid:int,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   return {'ok':True,'id':ensure_order_note(c,oid,s['room_id'],s['player_id'])}
 
 # Reading, evidence and reflection are separate from financial performance.
@@ -667,20 +714,24 @@ class WatchIn(BaseModel):
  enabled:bool=True
 
 @app.post('/api/watchlist')
-def update_watchlist(b:WatchIn,authorization:str|None=Header(None)):
+def update_watchlist(b:WatchIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if b.asset not in AMAP:err('상품을 찾을 수 없습니다.',404)
  with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   if b.enabled:c.execute('INSERT OR IGNORE INTO watchlist VALUES(?,?)',(s['player_id'],b.asset))
   else:c.execute('DELETE FROM watchlist WHERE player_id=? AND asset=?',(s['player_id'],b.asset))
  return {'ok':True}
 
 @app.post('/api/news/{nid}/read')
-def read_article(nid:int,authorization:str|None=Header(None)):
+def read_article(nid:int,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   day=one(c,'SELECT day FROM rooms WHERE id=?',(s['room_id'],))['day']
   validate_evidence(c,s['room_id'],day,[nid])
   c.execute('INSERT OR IGNORE INTO reading_log VALUES(?,?,?,?)',(s['player_id'],s['room_id'],nid,day))
@@ -694,13 +745,14 @@ class NoteIn(BaseModel):
  evidence_ids:list[int]=Field(default_factory=list,max_length=5)
 
 @app.post('/api/notes')
-def create_note(b:NoteIn,authorization:str|None=Header(None)):
+def create_note(b:NoteIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if b.asset not in AMAP:err('상품을 찾을 수 없습니다.',404)
  if len(b.thesis.strip())<5:err('어떤 생각인지 5자 이상 적어주세요.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('새 투자 가설은 거래일 중에 기록할 수 있어요. 기존 기록의 돌아보기는 언제든 가능합니다.')
   ids=validate_evidence(c,s['room_id'],r['day'],b.evidence_ids)
@@ -714,12 +766,13 @@ class ReflectIn(BaseModel):
  horizon:str|None=Field(default=None,min_length=2,max_length=60)
 
 @app.patch('/api/notes/{nid}')
-def reflect_note(nid:int,b:ReflectIn,authorization:str|None=Header(None)):
+def reflect_note(nid:int,b:ReflectIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
  if len(b.reflection.strip())<5:err('돌아보기를 5자 이상 적어주세요.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation)
   cur=c.execute('UPDATE investment_notes SET reflection=? WHERE id=? AND player_id=? AND room_id=?',
                 (b.reflection.strip(),nid,s['player_id'],s['room_id']))
   if cur.rowcount!=1:err('기록을 찾을 수 없습니다.',404)
@@ -760,7 +813,7 @@ def demo_state():
    for bar in bars:
     for key in ('open','high','low'):bar[key]=bar[key] or bar['price']
     bar['reconstructed']=False
-  out={'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral'},
+  out={'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral','generation':0},
    'fee_policy':FEE_POLICY,'assets':assets,'news':news,'players_count':6,'player':{'fees_paid':0,'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
    'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
    'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
@@ -771,3 +824,17 @@ def demo_state():
 
 @app.get('/api/demo')
 def demo():return demo_state()
+
+# Optional, explicit one-time operator request for the user's current reset.
+# The request ID is recorded in SQLite; a restart cannot apply it a second time.
+def apply_reset_request():
+ request_id=os.getenv('HARU_RESET_PLAY_ONCE','').strip()
+ if not request_id:return
+ if len(request_id)>100 or not all(ch.isalnum() or ch in '-_' for ch in request_id):
+  raise ValueError('Invalid reset request identifier')
+ with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  result=game_reset.apply_operator_request(c,request_id,os.getenv('HARU_RESET_ROOM_CODE','').strip().upper(),ASSETS,now())
+ print(json.dumps({'maintenance':'play_reset',**result},ensure_ascii=False),flush=True)
+
+apply_reset_request()

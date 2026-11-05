@@ -24,6 +24,7 @@ async function build(role) {
       url.startsWith('/api/history/') ? fixture.history :
       url.startsWith('/api/admin/student/') ? fixture.preview :
       {ok:true, status:'offline', message:'isolated test'};
+    if(url === '/api/admin/reset') {state.room.day=1;state.room.generation=(state.room.generation||0)+1;data={ok:true,day:1,generation:state.room.generation};}
     if(url === '/api/admin/advance') {
       state.room.day++;
       data = {ok:true, day:state.room.day, phase:'trading'};
@@ -97,6 +98,16 @@ async function build(role) {
       w.closeModal();
     } else {
       assert.equal(d.querySelector('.trade-submit').disabled,true);
+      w.go('admin');assert.ok(d.querySelector('.reset-controls'));
+      w.resetGameModal();assert.equal(d.querySelector('#reset-submit').disabled,true);
+      const confirmation=d.querySelector('#reset-confirm');confirmation.value='틀린 글';confirmation.dispatchEvent(new w.Event('input',{bubbles:true}));
+      assert.equal(d.querySelector('#reset-submit').disabled,true);
+      confirmation.value='초기화';confirmation.dispatchEvent(new w.Event('input',{bubbles:true}));assert.equal(d.querySelector('#reset-submit').disabled,false);
+      await w.submitGameReset();const resetCall=calls.find(c=>c.url==='/api/admin/reset');
+      assert.equal(JSON.parse(resetCall.options.body).confirmation,'초기화');
+      assert.equal(resetCall.options.headers['X-Haru-Game-Generation'],'0');
+      assert.equal(w.eval('Object.keys(tradeDrafts).length'),0);
+      assert.equal(d.querySelector('#reset-confirm'),null);
       w.go('home');
       await Promise.all([w.adminAction('advance'),w.adminAction('advance')]);
       assert.equal(calls.filter(c=>c.url==='/api/admin/advance').length,1);

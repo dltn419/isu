@@ -221,3 +221,13 @@ body { font-size:15px; line-height:1.65; }
   .preview-chooser .input { width:100%; }
   .modal .article-body { font-size:15px; }
 }
+
+.reset-controls { margin-bottom:22px; border-color:#e6cfcb; }
+.reset-controls>p { font-size:14px; color:#586b61; }
+.reset-backup { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-top:17px; padding-top:13px; border-top:1px solid var(--border); }
+.reset-summary { display:grid; grid-template-columns:1fr 1fr; gap:13px; margin:18px 0; }
+.reset-summary>div { padding:15px; border:1px solid var(--border); border-radius:10px; background:#f8faf7; }
+.reset-summary p { margin:6px 0 0; font-size:14px; }
+@media(max-width:760px) { .reset-summary { grid-template-columns:1fr; } }
+
+.reset-controls .btn.red,#reset-submit { background:#9e4541; color:white; }
