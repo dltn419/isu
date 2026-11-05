@@ -12,6 +12,28 @@ PROFILES = {
     '의료·제약': ('병원·제약사 공급 계약', '의약품·의료장비 주문', '연구·생산 비용', '의료 기술·신약 검증', '의약품 원료 공급'),
     '미래사업': ('AI·자동화 설비 계약', '데이터센터·자동화 주문', '전력·설비 운영 비용', '차세대 장비 성능 검증', '핵심 장비 납품'),
 }
+COMPANY_PROFILES = {
+    'HBEL': ('스마트기기·반도체 공급 계약', '스마트폰·가전 주문', '부품·생산 비용', '차세대 반도체 성능 검증', '핵심 반도체 부품 공급'),
+    'NXDV': ('고급 기기 판매 제휴', '프리미엄 기기 예약 판매', '자체 칩 개발·생산 비용', '신형 기기 시제품 검증', '디스플레이·칩 공급'),
+    'HBCP': ('센서·카메라 모듈 납품 계약', '전자회사 부품 주문', '센서 생산·검사 비용', '차세대 카메라 센서 검증', '센서 소재 공급'),
+    'SCNT': ('기업 보안 서비스 계약', '보안 서비스 신규 가입', '서버·보안 인력 운영 비용', '위협 탐지 기술 검증', '고객사 보안 시스템 구축'),
+    'NURA': ('기업 출장·항공화물 운송 계약', '국제선 여객·화물 예약', '항공유·정비 비용', '운항 효율화 기술 검증', '항공기 정비 부품 확보'),
+    'LTAI': ('관광상품·단거리 노선 제휴', '단거리 항공권 예약', '항공유·공항 사용 비용', '예약·운항 효율화 시험', '운항용 항공기 확보'),
+    'NUTS': ('항공기 정비 계약', '항공기 점검·수리 예약', '정비 인력·장비 비용', '항공기 고장 예측 기술 검증', '정비용 부품 확보'),
+    'ARLG': ('국제화물 배송 계약', '해외 배송 물량', '운송·물류센터 운영 비용', '화물 분류 자동화 시험', '운송용 장비 확보'),
+    'DDFF': ('라면·냉동식품 유통 계약', '가공식품 판매 주문', '밀가루·포장재 비용', '신제품 소비자 평가', '곡물·식품 원료 확보'),
+    'GRTB': ('건강식 유통업체 입점 계약', '고단백 간편식 주문', '식재료·냉장 유통 비용', '건강식 신제품 평가', '고단백 식재료 확보'),
+    'SWWV': ('디저트 브랜드 판매 제휴', '디저트·음료 주문', '설탕·유제품 비용', '신메뉴 소비자 평가', '디저트 원료 납품'),
+    'FMBR': ('식품회사 농산물 납품 계약', '농산물 원료 주문', '농산물 보관·운송 비용', '농산물 신선도 보존 시험', '계약 농가 수확·출하'),
+    'MDON': ('기존 의약품 공급 계약', '치료제·일반약 주문', '의약품 생산·관리 비용', '기존 약품 제조 개선 시험', '의약품 원료 확보'),
+    'NFBI': ('신약 공동연구 제휴', '후보물질 기술이전 협의', '신약 임상·연구 비용', '신약 후보물질 임상 검증', '임상시험용 원료 확보'),
+    'MDBW': ('바이오의약품 위탁생산 계약', '제약사 위탁생산 주문', '바이오 공장 가동 비용', '바이오의약품 생산공정 검증', '배양 원료·생산 장비 공급'),
+    'CLMD': ('병원 진단장비 납품 계약', '검사장비·소모품 주문', '진단장비 생산·유지 비용', '새 진단장비 정확도 검증', '진단 센서·검사 시약 확보'),
+    'BRCL': ('기업용 AI·클라우드 계약', '클라우드 서비스 이용량', '데이터센터 전력·서버 비용', '기업용 AI 기술 검증', '데이터센터 서버 확보'),
+    'MORB': ('물류창고 자동화 로봇 계약', '산업용 로봇 주문', '로봇 부품·조립 비용', '차세대 로봇 성능 검증', '로봇용 모터·센서 공급'),
+    'PWGR': ('전력망·저장장치 공급 계약', '전력설비·저장장치 주문', '구리·전력설비 생산 비용', '에너지저장장치 안전성 검증', '전력장비 핵심 소재 공급'),
+    'COED': ('데이터센터 냉각장비 계약', '고효율 냉각장비 주문', '냉각장비 제작·설치 비용', '신형 냉각장비 효율 검증', '냉각장비 핵심 부품 공급'),
+}
 KINDS = ['contract', 'sales', 'cost', 'research', 'supply']
 LENSES = {
     'contract': '계약 발표만으로 매출이 잡히지는 않아요. 실제 납품과 계약 규모를 확인해 보세요.',
@@ -152,8 +174,14 @@ def resolve_events(c, rid, day, seed, assets):
                      margin=MAX(-.08,MIN(.33,margin+?)) WHERE room_id=? AND asset=?''',
                   (revenue_delta, margin_delta, rid, a['id']))
         outcome = '진전 확인' if direction > 0 else '차질 확인'
-        result = ('실제 주문·납품 또는 운영 개선이 확인됐습니다.' if direction > 0 else
-                  '주문·납품 또는 운영 계획에 차질이 확인됐습니다.')
+        results = {
+            'contract': ('거래 상대방과 주요 계약 조건이 확정됐습니다.', '계약 조건을 맞추지 못해 사업 계획에 차질이 생겼습니다.'),
+            'sales': ('관련 사업 수요가 이전보다 개선됐다는 운영 자료가 나왔습니다.', '관련 사업 수요가 기대에 미치지 못했다는 운영 자료가 나왔습니다.'),
+            'cost': ('비용 부담을 줄이는 운영 개선이 확인됐습니다.', '예상했던 것보다 비용 부담이 커진 것으로 확인됐습니다.'),
+            'research': ('추가 기술 검증에서 목표 수준에 진전이 확인됐습니다.', '추가 기술 검증에서 보완 사항이 발견됐습니다.'),
+            'supply': ('필요한 원료·부품 확보와 납품 일정이 개선됐습니다.', '필요한 원료·부품 확보나 납품 일정에 차질이 생겼습니다.'),
+        }
+        result = results[e['kind']][0 if direction > 0 else 1]
         body = (f'{e["start_day"]}일차에 보도한 {e["title"]}의 후속 소식입니다. {result} '
                 + ('매출이나 이익 개선에 기여할 것으로 예상되지만, 다른 비용도 함께 확인해야 합니다.' if direction > 0 else
                    '매출 성장이나 이익률에 부담이 생겼습니다. 다른 사업이 이를 메울 수 있는지는 분기 실적에서 확인해야 합니다.'))
@@ -179,7 +207,7 @@ def publish_news(c, rid, day, seed, mood, assets):
     chosen.append(rng.choice([a for a in stocks if a not in chosen]))
     for i, a in enumerate(chosen):
         kind = KINDS[(day + i) % len(KINDS)]
-        subject = PROFILES[a['sector']][KINDS.index(kind)]
+        subject = COMPANY_PROFILES.get(a['id'], PROFILES[a['sector']])[KINDS.index(kind)]
         positive_prob = {'positive': .68, 'neutral': .5, 'negative': .3}[mood]
         direction = 1 if rng.random() < positive_prob else -1
         mixed = rng.random() < .2
@@ -258,7 +286,8 @@ def release_earnings(c, rid, day, seed, assets):
         evidence = query(c, "SELECT id,title FROM news WHERE room_id=? AND day>=? AND day<=? AND sector=? AND kind IN ('company','followup') ORDER BY day DESC,id DESC LIMIT 6",
                          (rid, max(1, day - 5), day, a['id']))
         driver = ' / '.join(x['title'] for x in evidence[:2]) or '분기 중 수요와 비용의 변화'
-        explanation = (f'매출은 기준 분기 대비 {rev_growth:+.1f}%, 영업이익은 {profit_growth:+.1f}% 변했습니다. '
+        comparison = '기준 실적' if prev['quarter'] == 0 else f'{prev["quarter"]}분기'
+        explanation = (f'매출은 {comparison} 대비 {rev_growth:+.1f}%, 영업이익은 {profit_growth:+.1f}% 변했습니다. '
                        f'사전에 공개된 영업이익 예상 {expected_profit:,}억원과 비교하면 {verdict}입니다. '
                        f'분기 중 확인할 단서: {driver}.')
         outlook = ('주문과 비용 개선이 이어질지 후속 보도를 확인하세요.' if profit > expected_profit else
