@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import classroom_engine as engine
+import classroom_guides as guides
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -98,6 +99,7 @@ def init():
   if 'mood' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
   engine.initialize_schema(c)
+  c.execute('CREATE INDEX IF NOT EXISTS idx_activity_orders ON orders(room_id,status,filled_day)')
   for existing in c.execute('SELECT id,seed,day FROM rooms').fetchall():
    engine.ensure_room(c,existing['id'],existing['seed'],existing['day'],ASSETS)
    engine.record_business_day(c,existing['id'],existing['day'],ASSETS)
@@ -235,10 +237,12 @@ def state(authorization:str|None=Header(None)):
   prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   price_map={x['asset']:x for x in prices}
   out={'room':r,'role':s['role'],'assets':[{**a,**price_map.get(a['id'],{})} for a in ASSETS],
-       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
+       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
   out.update(engine.public_data(c,r['id'],r['day']))
-  for n in out['news']:n['related_assets']=json.loads(n['related_assets'])
+  for n in out['news']:
+   n['related_assets']=json.loads(n['related_assets'])
+   n['metrics']=json.loads(n['metrics'])
   if s['role']=='player':
    pid=s['player_id']; p=dict(one(c,'SELECT id,name,cash FROM players WHERE id=?',(pid,)))
    holdings=rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,))
@@ -261,6 +265,7 @@ def state(authorization:str|None=Header(None)):
    out['all_ready']=bool(out['participants']) and out['ready_count']==len(out['participants'])
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
    out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
+  out.update(guides.public_guides(out,guides.market_activity(c,r['id'],r['day'])))
   return out
 @app.get('/api/admin/student/{pid}')
 def admin_student(pid:int,authorization:str|None=Header(None)):
@@ -665,8 +670,10 @@ def demo_state():
    engine.publish_news(c,rid,day,seed,'neutral',ASSETS)
   price_map={x['asset']:x for x in rows(c,'SELECT asset,price,change FROM prices WHERE day=6')}
   assets=[{**a,**price_map[a['id']]} for a in ASSETS]
-  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end FROM news ORDER BY day DESC,id DESC')
-  for n in news:n['related_assets']=json.loads(n['related_assets'])
+  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics FROM news ORDER BY day DESC,id DESC')
+  for n in news:
+   n['related_assets']=json.loads(n['related_assets'])
+   n['metrics']=json.loads(n['metrics'])
   holdings=[{'asset':'HBEL','qty':2,'cost':20000},{'asset':'GRTB','qty':3,'cost':13800},{'asset':'MKT','qty':2,'cost':10000}]
   net=56200+sum(h['qty']*price_map[h['asset']]['price'] for h in holdings)
   histories={a['id']:rows(c,'SELECT day,price,change,open_price AS open,high_price AS high,low_price AS low,price AS close FROM prices WHERE asset=? ORDER BY day',(a['id'],)) for a in ASSETS}
@@ -674,11 +681,13 @@ def demo_state():
    for bar in bars:
     for key in ('open','high','low'):bar[key]=bar[key] or bar['price']
     bar['reconstructed']=False
-  return {'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral'},
+  out={'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral'},
    'assets':assets,'news':news,'players_count':6,'player':{'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
    'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
    'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
    'histories':histories,**engine.public_data(c,rid,6)}
+  out.update(guides.public_guides(out,{'start_day':4,'end_day':6,'source':'우리 반 실제 체결','ranking':'체결금액','items':[]}))
+  return out
  finally:c.close()
 
 @app.get('/api/demo')

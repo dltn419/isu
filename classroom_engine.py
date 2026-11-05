@@ -2,6 +2,7 @@
 import json
 import math
 import random
+import market_expectations as expectations
 
 SECTORS = ['기술', '항공', '식품', '의료·제약', '미래사업']
 MOOD_NAMES = {'positive': '긍정', 'neutral': '중립', 'negative': '부정'}
@@ -121,6 +122,7 @@ def initialize_schema(c):
     c.execute('CREATE INDEX IF NOT EXISTS idx_news_room_day ON news(room_id,day)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_events_due ON business_events(room_id,due_day,stage)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_operating_window ON operating_effects(room_id,start_day,end_day)')
+    expectations.initialize(c)
 
 
 def ensure_room(c, rid, seed, day, assets):
@@ -139,24 +141,27 @@ def ensure_room(c, rid, seed, day, assets):
         c.execute('INSERT INTO businesses VALUES(?,?,?,?,?,?,?,?,?)',
                   (rid, a['id'], rev, 1, margin, cash, debt, growth, day))
         profit = round(rev * margin)
-        c.execute('INSERT OR IGNORE INTO financials VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        c.execute('''INSERT OR IGNORE INTO financials(room_id,asset,quarter,day,revenue,profit,margin,cash,debt,
+                     expected_revenue,expected_profit,revenue_growth,profit_growth,surprise,verdict,outlook,explanation,evidence_ids)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (rid, a['id'], 0, day, rev, profit, round(margin * 100, 2), round(cash), round(debt),
                    rev, profit, 0, 0, 0, '기준 실적', '이후 뉴스와 실적을 비교해 보세요.',
                    '게임 시작 시 공개된 비교 기준입니다. 재무 수치의 단위는 가상 억원입니다.', '[]'))
         expected_rev = round(rev * (1 + growth * 2.5) * rng.uniform(.97, 1.03))
         expected_profit = round(expected_rev * margin * rng.uniform(.96, 1.04))
-        c.execute('INSERT OR IGNORE INTO forecasts VALUES(?,?,?,?,?,?)',
-                  (rid, a['id'], quarter, day, expected_rev, expected_profit))
+        c.execute('''INSERT OR IGNORE INTO forecasts(room_id,asset,quarter,published_day,revenue,profit,base_revenue,base_margin)
+                     VALUES(?,?,?,?,?,?,?,?)''',
+                  (rid, a['id'], quarter, day, expected_rev, expected_profit, expected_rev, expected_profit/max(1,expected_rev)))
 
 
 def article(c, rid, day, title, body, target, impact=0, *, kind='company',
             source='하루경제', certainty='전망', event_id=None, related=None, lens='',
-            horizon='short', expected_start=None, expected_end=None):
-    cur = c.execute('''INSERT INTO news(room_id,day,title,body,sector,impact,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            horizon='short', expected_start=None, expected_end=None, metrics=None):
+    cur = c.execute('''INSERT INTO news(room_id,day,title,body,sector,impact,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (rid, day, title, body, target, round(impact, 3), kind, source,
                      certainty, event_id, json.dumps(related or [], ensure_ascii=False), lens,
-                     horizon, expected_start, expected_end))
+                     horizon, expected_start, expected_end,json.dumps(metrics or {},ensure_ascii=False)))
     return cur.lastrowid
 
 
@@ -234,6 +239,11 @@ def resolve_events(c, rid, day, seed, assets):
         end = e['expected_end'] or min(24, expected + 3)
         meta = dict(horizon=horizon, expected_start=expected, expected_end=end,
                     event_id=e['id'], related=[a['id']], lens=LENSES[e['kind']])
+        quantitative = e['model_version'] >= 2
+        metrics = {'revenue_pct': round((e['target_revenue_delta'] or 0)*100,1),
+                   'margin_pp': round((e['target_margin_delta'] or 0)*100,2),
+                   'preparation_margin_pp': round(e['preparation_margin_delta']*100,2),
+                   'status':'target'}
         if horizon != 'short' and day < expected:
             due = min(expected, day + rng.randint(3, 5))
             c.execute("UPDATE business_events SET stage='tracking',checkpoint_count=checkpoint_count+1,due_day=? WHERE id=?", (due, e['id']))
@@ -243,16 +253,27 @@ def resolve_events(c, rid, day, seed, assets):
                     + ('추가 비용과 일정 위험을 점검하고 있습니다. ' if caution else '협의·준비 작업은 계속되고 있지만 아직 최종 결과나 매출 확정은 아닙니다. ')
                     + horizon_sentence(horizon, expected, end)
                     + ' 지금의 주가 반응과 나중에 발표할 실적을 구분해서 살펴보세요.')
-            article(c, rid, day, title, body, a['id'], -.25 if caution else e['direction'] * e['magnitude'] * 4,
-                    kind='followup', certainty='중간 점검', **meta)
+            if quantitative:
+                body += ' 목표 수치와 일정은 이전 보도와 같습니다. 아직 새 영업 성과가 확인된 것은 아닙니다. '
+                metrics['status'] = 'unchanged'
+            article(c, rid, day, title, body, a['id'], 0 if quantitative else (-.25 if caution else e['direction'] * e['magnitude'] * 4),
+                    kind='followup', certainty='중간 점검', metrics=metrics if quantitative else None, **meta)
             continue
         if not e['delayed'] and day < 23 and rng.random() < .16:
             revised = min(24, day + 2)
             revised_end = min(24, end + revised - expected)
             c.execute("UPDATE business_events SET stage='delayed',delayed=1,due_day=?,expected_start=?,expected_end=? WHERE id=?", (revised,revised,revised_end,e['id']))
+            impact = -.35
+            if quantitative:
+                metrics['status'] = 'delayed'
+                old_state = c.execute('SELECT * FROM event_expectations WHERE event_id=?',(e['id'],)).fetchone()
+                impact = expectations.revise_event(c,rid,e['id'],a['id'],day,metrics,revised,revised_end,horizon,
+                          weight=old_state['weight'],prep_start=old_state['prep_start'],
+                          prep_end=revised-1 if old_state['prep_start'] else 0)
+                c.execute("UPDATE operating_effects SET end_day=? WHERE event_id=? AND label='준비 비용'", (revised-1,e['id']))
             article(c, rid, day, f'{a["name"]}, {e["title"]} 확인 일정 조정',
                     f'예정했던 사업 확인이 {revised}일차 전후로 늦어졌습니다. 추가 준비와 검토가 필요하며, 당초 기대했던 매출이 늦게 반영되거나 줄어들 수 있습니다. 성공·실패는 아직 확정되지 않았습니다.',
-                    a['id'], -.35, kind='followup', certainty='일정 조정',
+                    a['id'], impact, kind='followup', certainty='일정 조정', metrics=metrics if quantitative else None,
                     **{**meta,'expected_start':revised,'expected_end':revised_end})
             continue
         realized = rng.random() < (.72 if e['direction'] < 0 else .68)
@@ -262,6 +283,12 @@ def resolve_events(c, rid, day, seed, assets):
         margin_delta = direction * magnitude * (.23 if e['kind'] == 'cost' else .075)
         if e['kind'] == 'cost':
             revenue_delta *= .16
+        if quantitative:
+            # An improving business can still deliver less than the original target.
+            scale = rng.uniform(.35,1.2) if realized else -rng.uniform(.25,.65)
+            metrics.update(revenue_pct=round(metrics['revenue_pct']*scale,1),
+                           margin_pp=round(metrics['margin_pp']*scale,2),status='confirmed')
+            revenue_delta,margin_delta = metrics['revenue_pct']/100,metrics['margin_pp']/100
         actual_end = min(24, max(day, end))
         add_operating_effect(c, rid, e['id'], a['id'], day, actual_end,
                              revenue_delta, margin_delta, '사업 운영 효과',
@@ -280,10 +307,19 @@ def resolve_events(c, rid, day, seed, assets):
                 '분기 실적은 하루의 결과가 아니라 분기 전체 영업 기록을 모아 계산합니다. ')
         if not realized:
             body += '처음 보도 때의 예상과 다른 결과가 나왔습니다. '
+        impact = direction * magnitude * 19
+        if quantitative:
+            body += expectations.metric_sentence(metrics,confirmed=True)
+            body += (f'처음 목표는 매출 {e["target_revenue_delta"]*100:+.1f}%, '
+                     f'이익률 {e["target_margin_delta"]*100:+.2f}%p였습니다. '
+                     '사업이 개선되어도 이미 기대했던 수준보다 부족하면 가격 반응은 약하거나 반대일 수 있습니다. ')
+            old_state = c.execute('SELECT * FROM event_expectations WHERE event_id=?',(e['id'],)).fetchone()
+            impact = expectations.revise_event(c,rid,e['id'],a['id'],day,metrics,day,actual_end,horizon,
+                      weight=1,prep_start=old_state['prep_start'],prep_end=min(day-1,old_state['prep_end']))
         body += '다른 주문과 비용도 함께 작용하므로 이 소식 하나만으로 이익이나 주가를 단정할 수 없습니다.'
         c.execute("UPDATE business_events SET stage=?,result=?,resolved_day=? WHERE id=?", ('confirmed' if realized else 'reversed',result,day,e['id']))
         article(c, rid, day, f'{a["name"]}, {e["title"]} ' + ('진전 확인' if direction > 0 else '차질 확인'),
-                body, a['id'], direction * magnitude * 19, kind='followup', certainty='사실 확인',
+                body, a['id'], impact, kind='followup', certainty='사실 확인',metrics=metrics if quantitative else None,
                 **{**meta,'expected_start':day,'expected_end':actual_end})
 
 
@@ -312,32 +348,51 @@ def publish_news(c, rid, day, seed, mood, assets):
             cur = c.execute('''INSERT INTO business_events(room_id,asset,kind,direction,magnitude,start_day,due_day,title,horizon,expected_start,expected_end)
                                VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (rid, a['id'], kind, direction, magnitude, day, due, subject, horizon, expected, end))
             event_id = cur.lastrowid
-            if horizon != 'short' and kind in ('research','contract','supply'):
-                add_operating_effect(c,rid,event_id,a['id'],day+1,expected-1,0,-magnitude*(.07 if kind=='research' else .025),'준비 비용')
-            strength = rng.randint(6, 18)
-            if kind == 'cost':
-                signal = f'비용을 약 {strength}% 줄일 수 있는 방안을 검토 중' if direction > 0 else f'관련 비용이 약 {strength}% 늘어날 가능성을 점검 중'
-            else:
-                signal = f'관련 사업 규모가 약 {strength}% 확대될 가능성을 검토 중' if direction > 0 else f'관련 사업 진행이 예상보다 약 {strength}% 부진할 가능성을 점검 중'
+            preparation = horizon != 'short' and kind in ('research','contract','supply')
+            metrics = expectations.target_metrics(kind,direction,magnitude,preparation)
+            c.execute('''UPDATE business_events SET model_version=2,target_revenue_delta=?,target_margin_delta=?,preparation_margin_delta=?
+                         WHERE id=?''',(metrics['revenue_pct']/100,metrics['margin_pp']/100,metrics['preparation_margin_pp']/100,event_id))
+            if preparation:
+                add_operating_effect(c,rid,event_id,a['id'],day+1,expected-1,0,metrics['preparation_margin_pp']/100,'준비 비용')
+            reference = c.execute('SELECT revenue,margin FROM financials WHERE room_id=? AND asset=? AND day<=? ORDER BY quarter DESC LIMIT 1',(rid,a['id'],day)).fetchone()
+            metrics['reference_revenue'] = reference['revenue']
+            metrics['reference_margin_pct'] = reference['margin']
+            impact = expectations.revise_event(c,rid,event_id,a['id'],day,metrics,expected,end,horizon,
+                      reference_margin=reference['margin']/100,weight=.536 if direction>0 else .594,
+                      prep_start=day+1 if preparation else 0,prep_end=expected-1 if preparation else 0)
             title = f'{a["name"]}, {subject} ' + ('기대 커져' if direction > 0 else '불확실성 확대')
-            body = (f'{a["name"]}은(는) {signal}이라고 밝혔습니다. 아직 확정 실적이 아닌 회사의 전망입니다. '
+            body = (f'{a["name"]}이(가) 새로운 사업 전망을 공개했습니다. ' + expectations.metric_sentence(metrics) + '아직 확정 실적이 아닌 회사의 목표입니다. '
                     f'{due}일차 전후에 진행 상황을 점검합니다. ' + horizon_sentence(horizon,expected,end) + ' 일정이나 결과는 달라질 수 있습니다. ')
             body += ('성장 기회가 있지만 초기 비용이 늘 수 있다는 반론도 나왔습니다.' if mixed else LENSES[kind])
             if horizon != 'short' and kind in ('research','contract','supply'):
-                body += ' 준비·연구 비용은 먼저 발생하고, 사업 성과는 목표 시점 이후에 나타날 수 있습니다.'
-            article(c, rid, day, title, body, a['id'], direction * magnitude * (8 if horizon!='short' else 11),
+                body += f' 준비 기간인 {day+1}~{expected-1}일차에는 이익률 {metrics["preparation_margin_pp"]:+.2f}%p의 준비·연구 비용이 먼저 발생할 수 있습니다.'
+            article(c, rid, day, title, body, a['id'], impact,
                     source=rng.choice(['하루경제', '기업리포트', '산업포커스']),
                     certainty='전망·미확정', event_id=event_id, related=[a['id']], lens=LENSES[kind],
-                    horizon=horizon,expected_start=expected,expected_end=end)
+                    horizon=horizon,expected_start=expected,expected_end=end,metrics=metrics)
         else:
             # Late news never rewrites the report that was already published this morning.
+            metrics = {'revenue_pct':round(direction*magnitude*.22*100,1) if day<24 else 0,
+                       'margin_pp':round(direction*magnitude*.025*100,2) if day<24 else 0,
+                       'preparation_margin_pp':0,'status':'operating'}
+            event_id,impact = None,0
             if day < 24:
-                add_operating_effect(c,rid,None,a['id'],day+1,24,direction*magnitude*.22,direction*magnitude*.025,'연말 운영 현황')
+                cur = c.execute('''INSERT INTO business_events(room_id,asset,kind,direction,magnitude,start_day,due_day,
+                    stage,title,result,resolved_day,horizon,expected_start,expected_end,model_version,target_revenue_delta,target_margin_delta)
+                    VALUES(?,?,?,?,?,?,?,'confirmed',?,?,?,'short',?,24,2,?,?)''',
+                    (rid,a['id'],kind,direction,magnitude,day,day,subject,'연말 운영 현황 공개',day,day+1,metrics['revenue_pct']/100,metrics['margin_pp']/100))
+                event_id = cur.lastrowid
+                add_operating_effect(c,rid,event_id,a['id'],day+1,24,metrics['revenue_pct']/100,metrics['margin_pp']/100,'연말 운영 현황')
+                reference = c.execute('SELECT margin FROM financials WHERE room_id=? AND asset=? ORDER BY quarter DESC LIMIT 1',(rid,a['id'])).fetchone()
+                impact = expectations.revise_event(c,rid,event_id,a['id'],day,metrics,day+1,24,'short',weight=1,
+                          reference_margin=reference['margin']/100,ramp_days=1,fade_days=0)
             article(c, rid, day, f'{a["name"]}, 연말 {subject} 점검',
                     f'회사는 {subject}의 최근 현황을 공개했습니다. ' +
                     ('운영 지표가 이전보다 개선됐다고 설명했습니다.' if direction > 0 else '운영 지표가 이전보다 약해졌다고 설명했습니다.') +
+                    (' '+expectations.metric_sentence(metrics,confirmed=True) if day<24 else ' 올해 영업은 마감됐으며 오늘 확정한 분기 실적을 바꾸지 않습니다.')+
                     ' 매출과 이익이 같은 방향으로 움직이는지는 최신 분기 보고서와 함께 비교해 보세요.',
-                    a['id'], direction * magnitude * 8 if day<24 else 0, certainty='운영 현황', related=[a['id']], lens=LENSES[kind],expected_start=min(24,day+1),expected_end=24)
+                    a['id'], impact, certainty='운영 현황', related=[a['id']],lens=LENSES[kind],
+                    event_id=event_id,metrics=metrics,expected_start=min(24,day+1),expected_end=24)
     focus = SECTORS[(day + seed) % 5]
     names = [a['name'] for a in stocks if a['sector'] == focus]
     sector_direction = {'positive': 1, 'neutral': 0, 'negative': -1}[mood]
@@ -357,6 +412,7 @@ def publish_news(c, rid, day, seed, mood, assets):
         record_business_day(c,rid,day,assets)
     title, body = tips[(day - 1) % len(tips)]
     article(c, rid, day, title, body, '전체', kind='briefing', source='투자 교실', certainty='생각해 보기')
+    expectations.refresh_estimates(c,rid,day)
 
 
 def earnings_evidence(c,rid,asset,day):
@@ -376,6 +432,8 @@ def release_earnings(c, rid, day, seed, assets):
     quarter = day // 6
     if c.execute('SELECT 1 FROM financials WHERE room_id=? AND quarter=?', (rid, quarter)).fetchone():
         return {}
+    # Include publicly confirmed morning updates; do not pay for them again as an earnings surprise.
+    expectations.refresh_estimates(c,rid,day)
     rng = random.Random(seed + quarter * 49003)
     reactions = {}
     for a in [a for a in assets if a['type'] == 'stock']:
@@ -384,11 +442,16 @@ def release_earnings(c, rid, day, seed, assets):
         forecast = c.execute('SELECT * FROM forecasts WHERE room_id=? AND asset=? AND quarter=?', (rid, a['id'], quarter)).fetchone()
         expected_rev = forecast['revenue'] if forecast else prev['revenue']
         expected_profit = forecast['profit'] if forecast else prev['profit']
+        market = expectations.latest(c,rid,a['id'],quarter,day)
+        market_rev = market['revenue'] if market else expected_rev
+        market_profit = market['profit'] if market else expected_profit
         daily = c.execute('SELECT AVG(revenue) revenue,AVG(profit) profit,COUNT(*) n FROM business_daily WHERE room_id=? AND asset=? AND day BETWEEN ? AND ?', (rid,a['id'],day-5,day)).fetchone()
         revenue = max(1,round(daily['revenue'] if daily['n'] else b['base_revenue']*b['revenue_index']))
         profit = round(daily['profit'] if daily['n'] else revenue*b['margin'])
         margin = round(profit / revenue * 100, 2)
         surprise = round((profit - expected_profit) / max(abs(expected_profit), expected_rev * .035) * 100, 2)
+        market_surprise = round((profit-market_profit)/max(abs(market_profit),market_rev*.035)*100,2)
+        market_verdict = '예상 상회' if market_surprise>7 else '예상 하회' if market_surprise< -7 else '예상 부합'
         rev_growth = round((revenue / prev['revenue'] - 1) * 100, 2)
         profit_growth = round((profit - prev['profit']) / max(abs(prev['profit']), prev['revenue'] * .035) * 100, 2)
         cash = max(1, round(b['cash'] + profit * .48 - revenue * .025))
@@ -398,20 +461,29 @@ def release_earnings(c, rid, day, seed, assets):
         driver = ' / '.join(x['title'] for x in evidence[:2]) or '분기 중 수요와 비용의 변화'
         comparison = '기준 실적' if prev['quarter'] == 0 else f'{prev["quarter"]}분기'
         explanation = (f'매출은 {comparison} 대비 {rev_growth:+.1f}%, 영업이익은 {profit_growth:+.1f}% 변했습니다. '
-                       f'사전에 공개된 영업이익 예상 {expected_profit:,}억원과 비교하면 {verdict}입니다. '
+                       f'당초 공개한 영업이익 예상 {expected_profit:,}억원과 비교하면 {verdict}입니다. '
+                       f'공개 뉴스로 바뀐 발표 직전 기대는 {market_profit:,}억원이며, 이 기준으로는 {market_verdict}입니다. '
                        f'영업 기간과 연결된 단서: {driver}. 분기 영업 기록 {daily["n"]}일을 평균해 계산했습니다.')
         outlook = ('주문과 비용 개선이 이어질지 후속 보도를 확인하세요.' if profit > expected_profit else
                    '이익률 회복과 추가 비용 발생 여부를 살펴보세요.')
-        c.execute('INSERT INTO financials VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        c.execute('''INSERT INTO financials(room_id,asset,quarter,day,revenue,profit,margin,cash,debt,
+                     expected_revenue,expected_profit,revenue_growth,profit_growth,surprise,verdict,outlook,explanation,evidence_ids)
+                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                   (rid, a['id'], quarter, day, revenue, profit, margin, cash, debt, expected_rev, expected_profit,
                    rev_growth, profit_growth, surprise, verdict, outlook, explanation, json.dumps([x['id'] for x in evidence])))
         c.execute('UPDATE businesses SET cash=?,debt=? WHERE room_id=? AND asset=?', (cash, debt, rid, a['id']))
-        reactions[a['id']] = clamp(surprise * .085, -7, 7)
+        c.execute('''UPDATE financials SET market_expected_revenue=?,market_expected_profit=?,market_surprise=?,
+                     market_verdict=?,market_expectation_day=? WHERE room_id=? AND asset=? AND quarter=?''',
+                  (market_rev,market_profit,market_surprise,market_verdict,market['published_day'] if market else day,rid,a['id'],quarter))
+        reactions[a['id']] = clamp(market_surprise * .085, -7, 7)
         if quarter < 4:
             # Freeze next-quarter expectations now; they are visible before subsequent news and results.
-            next_rev = max(1, round(revenue * (1 + b['growth'] * 6) * rng.uniform(.97, 1.03)))
-            next_profit = round(next_rev * clamp(margin/100 + rng.uniform(-.008, .008), -.08, .33))
-            c.execute('INSERT OR IGNORE INTO forecasts VALUES(?,?,?,?,?,?)', (rid, a['id'], quarter + 1, day, next_rev, next_profit))
+            public_rev,public_margin = expectations.quarter_factors(c,rid,a['id'],quarter,0)
+            base_rev = max(1,revenue/public_rev*(1+b['growth']*6)*rng.uniform(.97,1.03))
+            base_margin = clamp(margin/100-public_margin/public_rev+rng.uniform(-.008,.008),-.08,.33)
+            next_rev,next_profit = expectations.estimate(c,rid,a['id'],quarter+1,base_rev,base_margin)
+            c.execute('''INSERT OR IGNORE INTO forecasts(room_id,asset,quarter,published_day,revenue,profit,base_revenue,base_margin)
+                         VALUES(?,?,?,?,?,?,?,?)''', (rid,a['id'],quarter+1,day,next_rev,next_profit,base_rev,base_margin))
     article(c, rid, day, f'{quarter}분기 실적 발표 · 20개 기업 성적표 공개',
             '매출·영업이익·이익률·현금·부채와 사전 예상치가 공개됐습니다. 뉴스 속 기대가 실제 숫자로 이어졌는지 실적센터에서 비교해 보세요. 이번 발표에 대한 시장 반응은 오늘 가격에 함께 반영됐습니다.',
             '전체', kind='earnings', source='기업 공시센터', certainty='실적 확정', related=[a['id'] for a in assets if a['type'] == 'stock'])
@@ -428,6 +500,7 @@ def public_data(c, rid, day):
                          WHERE room_id=? AND start_day<=? ORDER BY start_day DESC,id DESC LIMIT 250''', (rid, day))
     forecasts = query(c, 'SELECT asset,quarter,published_day,revenue,profit FROM forecasts WHERE room_id=? AND published_day<=? ORDER BY quarter,asset', (rid, day))
     return {'reports': reports, 'forecasts': forecasts, 'events': events,
+            'market_estimates':expectations.public_estimates(c,rid,day),
             'calendar': [{'quarter': q, 'day': q * 6, 'released': day >= q * 6 and any(r['quarter'] == q for r in reports)} for q in range(1, 5)],
             'financial_unit': '가상 억원',
             'benchmark': {'deposit_rate':DEPOSIT_RATE,'term':24,'progress_rate':DEPOSIT_RATE*(day-1)/TRADING_INTERVALS}}
