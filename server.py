@@ -30,6 +30,32 @@ ASSETS += [
  {'id':'CORP','name':'튼튼 기업채','sector':'채권','type':'bond','risk':'medium','initial':10000,'yield':0.14},
  {'id':'JUNK','name':'도전 고수익채','sector':'채권','type':'bond','risk':'high','initial':10000,'yield':0.22},
 ]
+
+COMPANY_DESCRIPTIONS = {
+ "HBEL": "스마트폰·가전·반도체를 만드는 대기업입니다. 매출이 비교적 안정적이지만 세계 경기에 영향을 받습니다.",
+ "NXDV": "고급 스마트기기와 자체 설계 반도체를 개발합니다. 신제품 성공에 따라 주가가 크게 움직일 수 있습니다.",
+ "HBCP": "한빛전자에 센서와 카메라 부품을 공급하는 자회사입니다. 주요 고객의 판매량이 실적에 중요합니다.",
+ "SCNT": "기업의 정보보안과 클라우드 서비스를 제공합니다. 신규 계약이 성장 기회지만 보안 사고가 큰 위험입니다.",
+ "NURA": "국제선과 항공화물을 운영하는 대형 항공사입니다. 여행객 수, 유가, 환율에 민감합니다.",
+ "LTAI": "저렴한 단거리 항공권을 판매합니다. 관광 수요가 늘면 성장하지만 비용과 경쟁이 부담입니다.",
+ "NUTS": "항공기를 점검하고 수리하는 정비 기업입니다. 항공편이 늘면 정비 수요도 증가합니다.",
+ "ARLG": "항공화물과 국제 배송을 맡습니다. 해외 교역이 활발할 때 유리하지만 운송비에 민감합니다.",
+ "DDFF": "라면과 냉동식품을 판매하는 식품회사입니다. 꾸준한 수요가 강점이고 밀가루 가격이 중요합니다.",
+ "GRTB": "건강식과 고단백 간편식을 개발합니다. 새 식품의 유행과 원가 관리가 성장을 좌우합니다.",
+ "SWWV": "디저트와 음료를 판매하는 브랜드입니다. 인기 상품이 나오면 급성장하지만 유행이 빨리 바뀝니다.",
+ "FMBR": "식품회사에 농산물 원료를 공급합니다. 작황과 원재료 가격 변동이 수익에 영향을 줍니다.",
+ "MDON": "오랫동안 사용되는 치료제와 일반의약품을 판매합니다. 기존 약품 판매가 안정적인 편입니다.",
+ "NFBI": "비만·대사질환 신약을 연구합니다. 임상 성공 가능성이 크지만 실패하면 손실이 커질 수 있습니다.",
+ "MDBW": "다른 제약회사의 바이오의약품을 대신 생산합니다. 공장 가동률과 계약 체결이 중요합니다.",
+ "CLMD": "병원용 진단장비와 검사 소모품을 공급합니다. 의료기관의 장비 투자에 영향을 받습니다.",
+ "BRCL": "기업용 인공지능과 데이터센터 서비스를 제공합니다. AI 투자 확대가 성장 기회입니다.",
+ "MORB": "공장과 물류창고에 자동화 로봇을 공급합니다. 기업 설비투자와 기술 경쟁이 중요합니다.",
+ "PWGR": "전력망과 에너지저장장치 장비를 생산합니다. 전력 공급 확대 사업의 영향을 받습니다.",
+ "COED": "데이터센터에 필요한 냉각장비를 개발합니다. AI 데이터센터 수요와 대형 계약에 따라 크게 변동합니다."
+}
+for a in ASSETS:
+ a['description']=COMPANY_DESCRIPTIONS.get(a['id'], '여러 기업에 분산 투자하는 상품입니다.' if a['type']=='etf' else '가격과 위험이 변할 수 있는 가상 금융상품입니다.')
+
 AMAP={a['id']:a for a in ASSETS}
 
 @contextmanager
@@ -63,6 +89,10 @@ def init():
   CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL, day INTEGER NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS daily_values(room_id INTEGER NOT NULL, player_id INTEGER NOT NULL, day INTEGER NOT NULL, net INTEGER NOT NULL, cash INTEGER NOT NULL, PRIMARY KEY(player_id,day));
   ''')
+  columns={row[1] for row in c.execute('PRAGMA table_info(prices)')}
+  for col in ('open_price','high_price','low_price'):
+   if col not in columns:c.execute(f'ALTER TABLE prices ADD COLUMN {col} INTEGER')
+  # Existing games keep their original closing prices. Historic candles are reconstructed from adjacent closes.
 init()
 
 def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -92,6 +122,10 @@ def snapshot_value(c,pid,rid,day):
 def record_all(c,rid,day):
  for p in rows(c,'SELECT id,cash FROM players WHERE room_id=?',(rid,)):
   c.execute('INSERT OR REPLACE INTO daily_values(room_id,player_id,day,net,cash) VALUES(?,?,?,?,?)',(rid,p['id'],day,snapshot_value(c,p['id'],rid,day),p['cash']))
+
+
+# Day-by-day fictional newsroom arcs; impacts take effect on the following trading day.
+STORY_NEWS = {1: ('AI 도시 건설 발표, 다섯 기업의 기대가 엇갈리다', '정부가 가상의 신도시 ‘미래항’에 AI 데이터센터를 유치하겠다고 발표했다. 브레인클라우드는 클라우드 구축을, 쿨링엣지는 냉각 설비를 검토 중이다. 하지만 전력 공급과 비용을 누가 감당할지가 관건이다.', '미래사업', 2.5), 2: ('전력 부족 경고…미래항 계획에 첫 번째 장애물', '전력 전문가들이 데이터센터에 필요한 전기를 공급하려면 새로운 전력망이 필요하다고 지적했다. 파워그리드솔루션에는 공급 계약의 기회지만, 다른 AI 기업에는 공사 지연 위험이 생겼다.', '미래사업', -1.5), 3: ('파워그리드, 미래항 전력망 설계 경쟁에 참여', '파워그리드솔루션이 전력망 사업의 입찰에 참여했다. 경쟁사가 더 낮은 가격을 제시하면서 계약은 아직 확정되지 않았다. 시장은 수주 가능성과 공사 비용을 함께 평가하고 있다.', 'PWGR', 2.5), 4: ('냉각 기술 시범 운용 성공, 정식 계약은 미정', '쿨링엣지가 소형 냉각 시설 테스트를 성공했다고 발표했다. 효율은 좋아 보이지만 대규모 설치 경험이 부족하다는 분석도 나왔다. 정식 계약 여부는 다음 주 결정될 예정이다.', 'COED', 3), 5: ('건설비 예상보다 증가…데이터센터 협상 난항', '원자재 비용이 오르면서 미래항 데이터센터 사업비가 당초 예산을 넘어설 가능성이 커졌다. 브레인클라우드는 투자 규모를 다시 검토하고 있다. 사업 전망은 여전히 유망하지만 단기 부담도 커졌다.', 'BRCL', -3), 6: ('1분기 결산 앞두고 AI 사업의 첫 시험대', '미래항 사업의 전력 계획은 일부 진전됐지만 투자 비용 문제가 남았다. 기업들은 1분기 실적을 앞두고 계약 여부를 공개할 예정이다. 호재만 보고 매수한 투자자들은 위험도 점검할 시점이다.', '미래사업', -1), 7: ('2분기 시작: 항공 관광 붐, 예약이 급증하다', '연휴를 앞두고 여행 예약이 크게 늘었다. 누리항공과 라이트에어는 항공편 증편을 논의 중이다. 다만 여행 수요가 실제 이익으로 이어지려면 항공유 비용도 안정되어야 한다.', '항공', 3), 8: ('항공유 가격 급등…항공권 할인 경쟁에 부담', '세계 에너지 시장이 불안해지며 항공유 가격이 올랐다. 라이트에어는 고객 유치를 위해 할인 행사를 유지하지만, 운항할수록 이익이 줄 수 있다는 걱정이 나온다.', '항공', -3), 9: ('누리항공, 장거리 화물 운송 신규 계약 체결', '누리항공이 기업 고객의 장거리 화물 운송 계약을 따냈다. 여객 수익과 화물 수익을 모두 확보할 기회이지만, 계약에 필요한 항공기 정비 비용도 증가한다.', 'NURA', 3), 10: ('정비 기업 누리테크에 일감 몰린다', '항공편이 늘면서 누리테크서비스의 정비 공장 가동률이 높아졌다. 인력 부족으로 작업이 늦어질 가능성도 있어, 수주 증가가 곧 순이익 증가를 뜻하지는 않는다.', 'NUTS', 2), 11: ('저가항공, 예매는 늘었지만 수익성 논란', '라이트에어의 탑승객 수가 증가했지만 과도한 할인 때문에 수익이 기대에 못 미칠 수 있다는 분석이 나왔다. 소비자는 반겼지만 투자자들의 시선은 나뉘고 있다.', 'LTAI', -4), 12: ('항공 업계 실적 공개 예고, 매출보다 순이익 주목', '여행 붐 덕분에 매출은 늘었지만 유가와 인건비가 변수로 남았다. 다음 분기 시작과 함께 공개될 실적에 시장의 관심이 쏠린다.', '항공', 1), 13: ('3분기 시작: 새로운 건강식 열풍', '유명 가상 스포츠 축제에서 건강 간편식이 인기를 얻었다. 그린테이블은 신제품을 출시하고 든든식품은 고단백 냉동식품 개발을 검토 중이다. 유행이 지속될지는 아직 알 수 없다.', '식품', 2.5), 14: ('원재료 가격 상승…식품회사 원가 부담 커져', '이상 기후로 일부 농산물 생산량이 줄었다. 팜브릿지의 원료 조달비와 여러 식품회사의 제조원가가 상승할 수 있다. 판매가격을 올리면 소비자 수요가 줄 위험도 있다.', '식품', -2.5), 15: ('그린테이블 신제품 완판, 생산 확대 결정', '그린테이블의 신제품이 빠르게 품절됐다. 회사는 생산시설을 늘리기로 했지만 새로운 설비를 갖추는 데 돈이 많이 든다. 매출 성장과 투자 비용이 동시에 발생한다.', 'GRTB', 4), 16: ('스윗웨이브 신메뉴 인기, 온라인 후기는 엇갈려', '스윗웨이브가 출시한 디저트가 SNS에서 화제를 모았다. 첫날 매출은 높았지만 품질 편차와 높은 가격을 지적하는 후기까지 등장했다.', 'SWWV', 2), 17: ('식품 기업 가격 인상설에 소비자 반발', '원가 부담을 견디기 어려운 업체들이 판매가격 인상을 검토한다는 소식이 전해졌다. 소비자 반발로 판매량이 감소할 수 있어, 투자자들은 마진과 수요를 함께 살피고 있다.', '식품', -2), 18: ('3분기 마지막 날, 유행보다 실적이 중요한 시점', '그린테이블과 스윗웨이브의 매출 소식은 좋았지만 원재료 가격이 문제로 남았다. 기업별로 이익과 현금이 얼마나 남았는지 살펴보라는 분석이 나왔다.', '식품', 1), 19: ('4분기 시작: 신약 연구 성과 발표 예고', '뉴핏바이오가 신약 시험 결과 일부를 곧 공개하겠다고 밝혔다. 성공한다면 치료제 개발이 진전되지만, 시험 결과가 기대에 못 미치면 주가가 크게 흔들릴 수 있다.', 'NFBI', 3), 20: ('신약 시험 일정 지연, 투자자 긴장', '뉴핏바이오가 추가 안전성 자료를 확보하기 위해 발표를 연기했다. 연구가 실패했다는 뜻은 아니지만, 상용화까지 걸리는 시간이 길어질 수 있다.', 'NFBI', -5), 21: ('메디온제약, 기존 치료제 판매 호조', '메디온제약은 기존 의약품 판매가 예상보다 안정적이라고 밝혔다. 급격한 성장 소식은 없지만 불확실성이 큰 신약 개발사와 다른 사업 구조가 부각됐다.', 'MDON', 2), 22: ('바이오 생산 계약, 메디온바이오웍스에 호재', '메디온바이오웍스가 해외 기업과 위탁 생산 계약을 협의하고 있다. 계약이 성사되면 공장 가동률이 오를 전망이지만, 아직 확정된 매출은 아니다.', 'MDBW', 3), 23: ('뉴핏바이오 시험 결과 일부 공개…평가는 혼조', '뉴핏바이오는 치료 효과 가능성을 확인했다고 발표했으나 일부 지표는 기대에 못 미쳤다. 시장은 추가 시험이 필요하다는 점에 주목했다.', 'NFBI', -3), 24: ('가상 1년 마감: 네 산업 이야기의 결말', '미래항의 AI 투자, 항공 여행 붐, 식품 신제품, 바이오 신약의 결과가 서로 달랐다. 뉴스 한 줄보다 실제 계약과 비용, 위험을 함께 살핀 투자자가 무엇을 배웠는지 돌아볼 시간이다.', '전체', 0)}
 
 class CreateRoom(BaseModel):
  name:str=Field(min_length=2,max_length=50)
@@ -140,7 +174,8 @@ def create_room(b:CreateRoom):
   rid=cur.lastrowid
   c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
   c.execute('INSERT INTO sessions(token_hash,room_id,player_id,role,created) VALUES(?,?,NULL,?,?)',(digest(secret),rid,'admin',now()))
-  c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,0)',(rid,1,'모의 금융시장 개장','20개 기업과 다양한 금융상품의 거래가 시작되었습니다.','전체'))
+  headline,article,sector,effect=STORY_NEWS[1]
+  c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,?)',(rid,1,headline,article,sector,effect))
   log(c,rid,1,'create','교사가 게임방 생성')
  return {'token':secret,'code':code,'role':'admin'}
 @app.post('/api/admin/login')
@@ -197,12 +232,36 @@ def state(authorization:str|None=Header(None)):
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
    out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.status,o.reason FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
   return out
+@app.get('/api/admin/student/{pid}')
+def admin_student(pid:int,authorization:str|None=Header(None)):
+ s=admin(authorization)
+ with conn() as c:
+  r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  p=one(c,'SELECT id,name,cash FROM players WHERE id=? AND room_id=?',(pid,s['room_id']))
+  if not p:err('해당 학생을 찾을 수 없습니다.',404)
+  player=dict(p)
+  player['net']=snapshot_value(c,pid,r['id'],r['day'])
+  player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
+  return {'player':player,'holdings':rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,)),
+    'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
+    'orders':rows(c,'SELECT id,asset,side,qty,price,status,reason,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
+    'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
+    'values':rows(c,'SELECT day,net,cash FROM daily_values WHERE player_id=? ORDER BY day',(pid,))}
+
 @app.get('/api/history/{asset}')
 def history(asset:str,authorization:str|None=Header(None)):
  s=session(authorization)
  if asset not in AMAP:err('상품을 찾을 수 없습니다.',404)
  with conn() as c:
-  return rows(c,'SELECT day,price,change FROM prices WHERE room_id=? AND asset=? ORDER BY day',(s['room_id'],asset))
+  data=rows(c,'SELECT day,price,change,open_price,high_price,low_price FROM prices WHERE room_id=? AND asset=? ORDER BY day',(s['room_id'],asset))
+  prev=None
+  for bar in data:
+   o=bar['open_price'] or prev or bar['price'];cl=bar['price']
+   bar['open']=o;bar['high']=bar['high_price'] or max(o,cl);bar['low']=bar['low_price'] or min(o,cl);bar['close']=cl
+   bar['reconstructed']=bar['open_price'] is None
+   del bar['open_price'];del bar['high_price'];del bar['low_price']
+   prev=cl
+  return data
 
 @app.post('/api/orders')
 def place_order(b:OrderIn,authorization:str|None=Header(None)):
@@ -213,18 +272,26 @@ def place_order(b:OrderIn,authorization:str|None=Header(None)):
   c.execute('BEGIN IMMEDIATE')
   rid=s['room_id'];pid=s['player_id'];r=one(c,'SELECT * FROM rooms WHERE id=?',(rid,))
   if r['phase']!='trading':err('현재 주문 가능한 상태가 아닙니다.')
-  price=one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,r['day'],b.asset))['price']
-  pending=rows(c,"SELECT asset,side,qty,price FROM orders WHERE player_id=? AND status='pending'",(pid,))
+  price=one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,r['day'],b.asset))['price'];value=price*b.qty
+  h=one(c,'SELECT * FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
+  cash=one(c,'SELECT cash FROM players WHERE id=?',(pid,))['cash']
   if b.side=='buy':
-   reserved=sum(x['price']*x['qty'] for x in pending if x['side']=='buy')
-   cash=one(c,'SELECT cash FROM players WHERE id=?',(pid,))['cash']
-   if b.qty*price>cash-reserved:err('현금이 부족합니다. 다른 대기 주문도 고려하세요.')
+   if value>cash:err('현금이 부족합니다.')
+   c.execute('UPDATE players SET cash=cash-? WHERE id=?',(value,pid))
+   if h:c.execute('UPDATE holdings SET qty=qty+?,cost=cost+? WHERE player_id=? AND asset=?',(b.qty,value,pid,b.asset))
+   else:c.execute('INSERT INTO holdings(player_id,asset,qty,cost) VALUES(?,?,?,?)',(pid,b.asset,b.qty,value))
   else:
-   h=one(c,'SELECT qty FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
-   reserved=sum(x['qty'] for x in pending if x['side']=='sell' and x['asset']==b.asset)
-   if b.qty>(h['qty'] if h else 0)-reserved:err('매도할 수량이 부족합니다.')
-  cur=c.execute('INSERT INTO orders(room_id,player_id,asset,side,qty,price,status,reason,created) VALUES(?,?,?,?,?, ?,?,?,?)',(rid,pid,b.asset,b.side,b.qty,price,'pending',b.reason.strip(),now()))
- return {'ok':True,'order_id':cur.lastrowid,'message':'주문이 접수됐습니다. 마감 시 체결됩니다.'}
+   if not h or b.qty>h['qty']:err('매도할 수량이 부족합니다.')
+   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(value,pid))
+   remaining=h['qty']-b.qty;cost=round(h['cost']*remaining/h['qty'])
+   if remaining:c.execute('UPDATE holdings SET qty=?,cost=? WHERE player_id=? AND asset=?',(remaining,cost,pid,b.asset))
+   else:c.execute('DELETE FROM holdings WHERE player_id=? AND asset=?',(pid,b.asset))
+  cur=c.execute('INSERT INTO orders(room_id,player_id,asset,side,qty,price,status,reason,created,filled_day) VALUES(?,?,?,?,?,?,?,?,?,?)',(rid,pid,b.asset,b.side,b.qty,price,'filled',b.reason.strip(),now(),r['day']))
+  c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,pid,r['day'],'trade',value*(-1 if b.side=='buy' else 1),f"{b.asset} {'매수' if b.side=='buy' else '매도'} {b.qty}주 (즉시 체결)"))
+  record_all(c,rid,r['day'])
+  log(c,rid,r['day'],'trade',f'{pid}번 학생 {b.asset} {b.side} {b.qty}주 즉시 체결')
+ return {'ok':True,'order_id':cur.lastrowid,'filled':True,'price':price,'message':'거래가 즉시 체결되어 내 자산에 반영됐습니다.'}
+
 @app.post('/api/orders/{oid}/cancel')
 def cancel_order(oid:int,authorization:str|None=Header(None)):
  s=session(authorization)
@@ -356,7 +423,11 @@ def generate_prices(c,rid,day,seed):
   price=max(1,round(old*(1+ret/100)))
   rets[id]=(price,(price/old-1)*100)
  for asset,(price,change) in rets.items():
-  c.execute('INSERT INTO prices VALUES(?,?,?,?,?)',(rid,day,asset,price,round(change,4)))
+  opening=previous[asset]
+  wiggle=max(1,round(opening*(0.003 + abs(change)/100*0.12 + rng.random()*0.004)))
+  high=max(opening,price)+wiggle
+  low=max(1,min(opening,price)-wiggle)
+  c.execute('INSERT INTO prices(room_id,day,asset,price,change,open_price,high_price,low_price) VALUES(?,?,?,?,?,?,?,?)',(rid,day,asset,price,round(change,4),opening,high,low))
 
 @app.post('/api/admin/next')
 def next_day(authorization:str|None=Header(None)):
@@ -374,11 +445,10 @@ def next_day(authorization:str|None=Header(None)):
    c.execute("UPDATE deposits SET status='matured',paid=? WHERE id=?",(paid,d['id']))
    c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,d['player_id']))
    c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,d['player_id'],day,'interest',paid,f"{d['term']}일 예금 만기 수령"))
-  samples=[('오늘의 시장 흐름','기업마다 뉴스와 수급에 따라 주가가 다르게 움직이고 있습니다.','전체'),('성장 산업 동향','미래 성장 산업의 투자 기대와 위험이 함께 주목받고 있습니다.','미래사업'),('소비 동향','식품 기업의 매출과 비용을 비교해 보세요.','식품'),('금리와 채권','금리 변화는 채권 가격에도 영향을 줄 수 있습니다.','전체')]
-  title,body,sector=samples[day%len(samples)]
-  c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,0)',(rid,day,title,body,sector))
+  title,body,sector,impact=STORY_NEWS[day]
+  c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,?)',(rid,day,title,body,sector,impact))
   if day in (7,13,19):
-   c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,0)',(rid,day,'분기 실적 발표','직전 분기 가격 변화와 투자 판단을 점검해보세요.','전체'))
+   c.execute('INSERT INTO news(room_id,day,title,body,sector,impact) VALUES(?,?,?,?,?,0)',(rid,day,'📊 분기 보고서: 이야기가 숫자로 이어졌을까?','지난 분기 주가의 흐름을 돌아보세요. 계약이 실제 매출과 이익으로 이어졌는지, 기대와 결과가 어떻게 달랐는지 토론해 보세요.','전체'))
   record_all(c,rid,day)
   log(c,rid,day,'next',f'{day}일차 시작 및 가격 갱신')
  return {'ok':True,'day':day}
