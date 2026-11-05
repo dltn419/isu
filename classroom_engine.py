@@ -254,7 +254,7 @@ def resolve_events(c, rid, day, seed, assets):
                     + horizon_sentence(horizon, expected, end)
                     + ' 지금의 주가 반응과 나중에 발표할 실적을 구분해서 살펴보세요.')
             if quantitative:
-                body += ' 목표 수치와 일정은 이전 보도와 같습니다. 아직 새 영업 성과가 확인된 것은 아닙니다. '
+                body += ' 전망 수치와 일정은 이전 보도와 같습니다. 아직 새 영업 성과가 확인된 것은 아닙니다. '
                 metrics['status'] = 'unchanged'
             article(c, rid, day, title, body, a['id'], 0 if quantitative else (-.25 if caution else e['direction'] * e['magnitude'] * 4),
                     kind='followup', certainty='중간 점검', metrics=metrics if quantitative else None, **meta)
@@ -310,7 +310,7 @@ def resolve_events(c, rid, day, seed, assets):
         impact = direction * magnitude * 19
         if quantitative:
             body += expectations.metric_sentence(metrics,confirmed=True)
-            body += (f'처음 목표는 매출 {e["target_revenue_delta"]*100:+.1f}%, '
+            body += (f'처음 제시한 전망은 매출 {e["target_revenue_delta"]*100:+.1f}%, '
                      f'이익률 {e["target_margin_delta"]*100:+.2f}%p였습니다. '
                      '사업이 개선되어도 이미 기대했던 수준보다 부족하면 가격 반응은 약하거나 반대일 수 있습니다. ')
             old_state = c.execute('SELECT * FROM event_expectations WHERE event_id=?',(e['id'],)).fetchone()
@@ -361,7 +361,7 @@ def publish_news(c, rid, day, seed, mood, assets):
                       reference_margin=reference['margin']/100,weight=.536 if direction>0 else .594,
                       prep_start=day+1 if preparation else 0,prep_end=expected-1 if preparation else 0)
             title = f'{a["name"]}, {subject} ' + ('기대 커져' if direction > 0 else '불확실성 확대')
-            body = (f'{a["name"]}이(가) 새로운 사업 전망을 공개했습니다. ' + expectations.metric_sentence(metrics) + '아직 확정 실적이 아닌 회사의 목표입니다. '
+            body = (f'{a["name"]}이(가) 새로운 사업 전망을 공개했습니다. ' + expectations.metric_sentence(metrics) + '아직 확정 실적이 아닌 회사의 전망입니다. '
                     f'{due}일차 전후에 진행 상황을 점검합니다. ' + horizon_sentence(horizon,expected,end) + ' 일정이나 결과는 달라질 수 있습니다. ')
             body += ('성장 기회가 있지만 초기 비용이 늘 수 있다는 반론도 나왔습니다.' if mixed else LENSES[kind])
             if horizon != 'short' and kind in ('research','contract','supply'):

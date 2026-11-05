@@ -55,7 +55,7 @@ def metric_sentence(metrics, confirmed=False):
     # Amounts describe this project at full operation, not the entire quarter.
     return (f'완전 가동 시 회사 전체 매출 {metrics["revenue_pct"]:+.1f}%, '
             f'영업이익률 {metrics["margin_pp"]:+.2f}%p의 ' +
-            ('영업 효과를 확인했습니다. ' if confirmed else '변화를 목표로 합니다. ') +
+            ('영업 효과를 확인했습니다. ' if confirmed else '변화를 예상하고 있습니다. ') +
             '분기 전체 수치는 실제 운영 일수와 가동 초기 반영률, 다른 사업의 영향을 함께 합산합니다. ')
 
 
