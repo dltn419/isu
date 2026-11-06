@@ -62,14 +62,14 @@ async function build(role) {
     assert.ok(d.querySelector('.price-explanation'),'current price explanation');
     assert.equal(d.querySelectorAll('.price-factors>div').length,3);
     assert.equal(d.querySelector('.price-explanation').open,false);
-    assert.equal(d.querySelector('.company-tabs button.active').textContent,'뉴스·사업');
+    assert.equal(d.querySelector('.company-tabs button.active').textContent,'가격 차트');
     if(role==='student'){
     d.querySelector('#qty').value='3';
     d.querySelector('#reason').value='같은 기업의 실적을 더 확인하겠다';
     w.updateOrderTotal();
     const firstEvidence=d.querySelector('#trade-evidence input');
     firstEvidence.checked=true;
-    d.querySelectorAll('.company-tabs button')[1].click();
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='분기 실적').click();
     assert.equal(d.querySelector('#reason').value,'같은 기업의 실적을 더 확인하겠다');
     assert.equal(d.querySelector('#qty').value,'3');
     assert.ok(d.querySelector('#trade-evidence input').checked);
@@ -83,10 +83,35 @@ async function build(role) {
     assert.ok(d.querySelector('.fee-disclosure').textContent.includes('0.015%'));
     }else{
       assert.ok(d.querySelector('.teacher-market-panel'));assert.equal(d.querySelector('.trade-submit'),null);
-      d.querySelectorAll('.company-tabs button')[1].click();
+      [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='분기 실적').click();
       assert.equal(d.querySelectorAll('.main-financials>.financial-tile').length,3);
     }
     if(role==='student') {
+      w.go('bank');
+      assert.equal(d.querySelector('#principal').min,'10000');
+      assert.equal(d.querySelector('#principal').step,'10000');
+      assert.ok(d.querySelector('.deposit-amount').textContent.includes('원'));
+      assert.ok(d.querySelector('.deposit-rules').textContent.includes('50%'));
+      w.eval('S.room.day=1;render()');
+      for(const [term,receive] of [[6,'10,200원'],[12,'10,450원'],[18,'10,700원'],[24,'11,000원']]){
+        d.querySelector('#term').value=String(term);w.bankCalc();
+        assert.equal(d.querySelector('#receive').textContent,receive);
+      }
+      for(const invalid of ['5000','15000']){
+        d.querySelector('#principal').value=invalid;w.bankCalc();
+        assert.equal(d.querySelector('#principal').getAttribute('aria-invalid'),'true');
+        assert.equal(d.querySelector('#deposit-submit').disabled,true);
+        const prior=calls.filter(c=>c.url==='/api/deposits').length;await w.openDeposit();
+        assert.equal(calls.filter(c=>c.url==='/api/deposits').length,prior);
+      }
+      d.querySelector('#principal').value='20000';d.querySelector('#term').value='6';w.bankCalc();
+      assert.equal(d.querySelector('#deposit-submit').disabled,false);
+      await w.openDeposit();
+      assert.deepEqual(JSON.parse(calls.find(c=>c.url==='/api/deposits').options.body),{term:6,principal:20000});
+      w.eval('S.room.day=24;render()');
+      assert.equal(d.querySelector('#deposit-submit').disabled,true,'no enabled signup after all maturities close');
+      w.eval('S.room.day=6');
+      await w.detail('HBEL','sell');
       w.eval('S.player.day_ready=true;render()');
       assert.equal(d.querySelector('.trade-submit').disabled,false);
       let confirmation='';w.confirm=message=>{confirmation=message;return false};
@@ -112,7 +137,31 @@ async function build(role) {
       w.closeModal();
     } else {
       assert.ok(d.querySelector('.teacher-market-panel'));
+      const original=w.eval('JSON.stringify(S.participants)');
+      w.eval(`S.participants=[
+        {id:301,name:'가 학생',ranking:{rank:3},net:90000,profit:-10000,day_ready:false,read_count:10,evidence_trades:1,note_count:3,reflection_count:2},
+        {id:302,name:'다 학생',ranking:{rank:1},net:110000,profit:10000,day_ready:true,read_count:2,evidence_trades:5,note_count:1,reflection_count:4},
+        {id:303,name:'나 학생',ranking:{rank:2},net:100000,profit:0,day_ready:false,read_count:6,evidence_trades:3,note_count:5,reflection_count:0}
+      ]`);
+      w.go('players');
+      for(const [key,ascending] of [
+        ['name',[301,303,302]],['rank',[302,303,301]],['net',[301,303,302]],['profit',[301,303,302]],
+        ['read_count',[302,303,301]],['evidence_trades',[301,303,302]],['note_count',[302,301,303]],['reflection_count',[303,301,302]]
+      ]){
+        w.eval(`participantSort={key:'${key}',order:'asc'};render()`);
+        const ids=()=>[...d.querySelectorAll('.participant-table tbody tr')].map(n=>+n.dataset.playerId);
+        assert.deepEqual(ids(),ascending,key+' ascending');
+        d.querySelector(`button[onclick="sortParticipants('${key}')"]`).click();
+        assert.deepEqual(ids(),[...ascending].reverse(),key+' descending');
+        assert.equal(d.querySelector('th[aria-sort="descending"] button').textContent.includes('↓'),true);
+      }
+      w.sortParticipants('day_ready');
+      assert.equal(d.querySelector('.participant-table tbody tr').dataset.playerId,'302');
+      w.sortParticipants('day_ready');
+      assert.equal(d.querySelector('.participant-table tbody tr:last-child').dataset.playerId,'302');
+      w.eval(`S.participants=${original};participantSort={key:'name',order:'asc'}`);
       w.go('admin');assert.ok(d.querySelector('.reset-controls'));
+      assert.ok(d.querySelector('.manual-news-timing').textContent.includes('판단할 시간'));
       w.resetGameModal();assert.equal(d.querySelector('#reset-submit').disabled,true);
       const confirmation=d.querySelector('#reset-confirm');confirmation.value='틀린 글';confirmation.dispatchEvent(new w.Event('input',{bubbles:true}));
       assert.equal(d.querySelector('#reset-submit').disabled,true);

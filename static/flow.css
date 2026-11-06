@@ -279,3 +279,7 @@ body { font-size:15px; line-height:1.65; }
 .price-evidence{display:grid;gap:6px;margin-top:12px}
 .price-evidence button{text-align:left;white-space:normal;line-height:1.6;justify-content:flex-start}
 @media(max-width:480px){.price-factors{gap:5px}.price-factors>div{padding:9px 7px}.price-factors b{font-size:14px}.price-factors span{font-size:10px}}
+
+.table-sort{display:inline-flex;align-items:center;gap:6px;font:inherit;font-weight:700;color:inherit;white-space:nowrap;background:none;border:0;padding:6px 0;cursor:pointer}
+.table-sort span{font-size:13px;color:#93a18e}.table-sort.active,.table-sort.active span{color:#287352}.table-sort:hover{color:#287352}.table-sort:focus-visible{outline:2px solid #427f65;outline-offset:3px;border-radius:3px}
+.deposit-amount{position:relative}.deposit-amount input{padding-right:42px}.deposit-amount>span{position:absolute;right:15px;top:50%;transform:translateY(-50%);font-size:13px;color:#6a7f69}.deposit-amount input[aria-invalid=true]{border-color:#b86b5a}.deposit-rules{line-height:1.9}

@@ -75,6 +75,19 @@ FEE_POLICY={'rate':0.00015,'percent':0.015,'minimum':1,'rounding':'half_up','num
 def trading_fee(gross):return max(1,(gross*15+50000)//100000)
 BOND_PRICE_PARAMETERS={'GOV':{'volatility':.65,'limit':5},'CORP':{'volatility':1.3,'limit':8},'JUNK':{'volatility':2,'limit':12}}
 NEWS_PRICING={'gain':2.5,'weights':(.6,.25,.15),'noise_scale':.75}
+DEPOSIT_RATES={6:.02,12:.045,18:.07,24:.10}
+DEPOSIT_POLICY={'unit':10000,'minimum':10000,'early_interest_factor':.5,
+                'products':[{'term':term,'rate':rate} for term,rate in DEPOSIT_RATES.items()]}
+
+def deposit_details(d,day):
+ item=dict(d)
+ item['maturity_day']=d['start_day']+d['term']-1
+ item['maturity_paid']=round(d['principal']*(1+d['rate']))
+ elapsed=max(0,day-d['start_day'])
+ ratio=0 if elapsed==0 else .5*min(1,elapsed/d['term'])
+ item['early_interest']=round(d['principal']*d['rate']*ratio)
+ item['early_paid']=d['principal']+item['early_interest']
+ return item
 
 def paid_fees(c,pid):
  return -one(c,"SELECT COALESCE(SUM(amount),0) n FROM ledgers WHERE player_id=? AND kind='fee'",(pid,))['n']
@@ -208,7 +221,7 @@ class OrderIn(BaseModel):
  expected_day:int|None=Field(default=None,ge=1,le=24)
  expected_price:int|None=Field(default=None,ge=1)
  evidence_ids:list[int]=Field(default_factory=list,max_length=5)
-class DepositIn(BaseModel): principal:int=Field(ge=1000,le=100000000); term:int
+class DepositIn(BaseModel): principal:int=Field(le=100000000); term:int
 class NewsIn(BaseModel): title:str=Field(min_length=2,max_length=120); body:str=Field(min_length=2,max_length=400); sector:str='전체'; impact:float=Field(default=0,ge=-12,le=12)
 class CashEdit(BaseModel): player_id:int; amount:int=Field(ge=-100000000,le=100000000); reason:str=Field(min_length=2,max_length=120)
 
@@ -217,7 +230,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'15.0-news-and-rank'}
+ return {'ok': True,'version':'16.0-teacher-and-deposits'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -291,6 +304,7 @@ def state(authorization:str|None=Header(None)):
        'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking,is_signal FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
   out['fee_policy']=FEE_POLICY
+  out['deposit_policy']=DEPOSIT_POLICY
   out['bond_policy']=bond_income.policy(r)
   rankings=room_rankings(c,r)
   out.update(engine.public_data(c,r['id'],r['day']))
@@ -300,7 +314,7 @@ def state(authorization:str|None=Header(None)):
   if s['role']=='player':
    pid=s['player_id']; p=dict(one(c,'SELECT id,name,cash FROM players WHERE id=?',(pid,)))
    holdings=holding_rows(c,pid)
-   deposits=rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))
+   deposits=[deposit_details(d,r['day']) for d in rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))]
    orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
    out.update(learning_data(c,pid,r['id']))
    out['bond_income']=bond_income.summary(c,pid)
@@ -317,6 +331,7 @@ def state(authorization:str|None=Header(None)):
     p['ranking']=rankings[p['id']]
     p['fees_paid']=paid_fees(c,p['id'])
     p['net']=snapshot_value(c,p['id'],r['id'],r['day'])
+    p['profit']=p['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(p['id'],))['v']
     p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],p['id'],r['day'])))
     p.update(learning_summary(c,p['id']))
     p['pending']=one(c,"SELECT COUNT(*) n FROM orders WHERE player_id=? AND status='pending'",(p['id'],))['n']
@@ -341,7 +356,7 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
   player['net']=snapshot_value(c,pid,r['id'],r['day'])
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
   return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),'bond_income':bond_income.summary(c,pid),'ranking':room_rankings(c,r)[pid],
-    'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
+    'deposits':[deposit_details(d,r['day']) for d in rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))],
     'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
     'values':rows(c,'SELECT day,net,cash FROM daily_values WHERE player_id=? ORDER BY day',(pid,))}
@@ -439,17 +454,19 @@ def cancel_order(oid:int,authorization:str|None=Header(None),x_haru_game_generat
 def deposit(b:DepositIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None)):
  s=session(authorization)
  if s['role']!='player':err('학생 계정이 필요합니다.',403)
- if b.term not in (6,12,18,24):err('예금 기간이 올바르지 않습니다.')
+ if b.term not in DEPOSIT_RATES:err('예금 기간이 올바르지 않습니다.')
  with conn() as c:
   c.execute('BEGIN IMMEDIATE')
   check_game_generation(c,s,x_haru_game_generation)
+  if b.principal<DEPOSIT_POLICY['minimum'] or b.principal%DEPOSIT_POLICY['unit']:
+   err('예금은 최소 10,000원이며 10,000원 단위로 가입해 주세요.')
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading' or r['day']+b.term-1>24:err('현재 가입할 수 없는 만기입니다.')
   pending=one(c,"SELECT COALESCE(SUM(qty*price),0) n FROM orders WHERE player_id=? AND side='buy' AND status='pending'",(s['player_id'],))['n']
   p=one(c,'SELECT cash FROM players WHERE id=?',(s['player_id'],))
   if b.principal>p['cash']-pending:err('사용 가능한 현금이 부족합니다.')
   c.execute('UPDATE players SET cash=cash-? WHERE id=?',(b.principal,s['player_id']))
-  c.execute('INSERT INTO deposits(player_id,room_id,principal,start_day,term,rate) VALUES(?,?,?,?,?,?)',(s['player_id'],s['room_id'],b.principal,r['day'],b.term,0.1*b.term/24))
+  c.execute('INSERT INTO deposits(player_id,room_id,principal,start_day,term,rate) VALUES(?,?,?,?,?,?)',(s['player_id'],s['room_id'],b.principal,r['day'],b.term,DEPOSIT_RATES[b.term]))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(s['room_id'],s['player_id'],r['day'],'deposit',-b.principal,f'{b.term}일 예금 가입'))
   selection_resumed=resume_selection(c,s,r['day'])
   record_all(c,s['room_id'],r['day'])
@@ -465,9 +482,7 @@ def close_deposit(did:int,authorization:str|None=Header(None),x_haru_game_genera
   if not d:err('해지할 수 없는 예금입니다.')
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('거래 가능한 시간에 해지하세요.')
-  elapsed=max(0,r['day']-d['start_day'])
-  ratio=0 if elapsed==0 else 0.5*min(1,elapsed/d['term'])
-  paid=d['principal']+round(d['principal']*d['rate']*ratio)
+  paid=deposit_details(d,r['day'])['early_paid']
   c.execute("UPDATE deposits SET status='early',paid=? WHERE id=?",(paid,did))
   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,s['player_id']))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(s['room_id'],s['player_id'],r['day'],'deposit',paid,'예금 중도해지'))
@@ -707,7 +722,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'15.0-news-and-rank'}
+def health():return {'ok':True,'db':str(DB.name),'version':'16.0-teacher-and-deposits'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -868,7 +883,7 @@ def demo_state():
     for key in ('open','high','low'):bar[key]=bar[key] or bar['price']
     bar['reconstructed']=False
   out={'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral','generation':0},
-   'fee_policy':FEE_POLICY,'assets':assets,'news':news,'players_count':6,'player':{'fees_paid':0,'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
+   'fee_policy':FEE_POLICY,'deposit_policy':DEPOSIT_POLICY,'assets':assets,'news':news,'players_count':6,'player':{'fees_paid':0,'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
    'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
    'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
    'histories':histories,**engine.public_data(c,rid,6)}
