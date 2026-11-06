@@ -12,12 +12,18 @@ from test_classroom_flow import classroom, advance
 def force_plan(c, teacher, dates=(4,9,15)):
     rid = c.get('/api/state',headers=teacher).json()['room']['id']
     with server.conn() as db:
+        # Tests may replace dates only before play; real games retain their private plan.
+        db.execute('DELETE FROM news WHERE room_id=? AND is_signal=1',(rid,))
+        db.execute('DELETE FROM breaking_cases WHERE room_id=?',(rid,))
         db.execute('UPDATE breaking_plans SET dates=? WHERE room_id=?', (json.dumps(dates),rid))
+        room=db.execute('SELECT * FROM rooms WHERE id=?',(rid,)).fetchone()
+        breaking_news.publish_clues(db,rid,room['day'],room['seed'],room['mood'],server.ASSETS)
     return rid
 
 
 def inspect_public(value):
-    private = {'seed','dates','not_before','shock','slot','breaking_plans','breaking_releases'}
+    private = {'seed','dates','not_before','shock','slot','breaking_plans','breaking_releases',
+               'breaking_cases','warning_day','signal_direction','has_hint','clue_news_id'}
     if isinstance(value,dict):
         assert not private.intersection(value)
         for item in value.values():
@@ -180,8 +186,14 @@ def test_existing_games_get_future_slots_without_rewriting_history(classroom,mon
     rid = before['room']['id']
     with server.conn() as db:
         db.execute('DELETE FROM breaking_plans WHERE room_id=?',(rid,))
+        db.execute('DELETE FROM breaking_cases WHERE room_id=?',(rid,))
     server.init()
-    assert c.get('/api/state',headers=learner).json() == before
+    after=c.get('/api/state',headers=learner).json()
+    # Existing history is immutable; an eligible warning can be added only today.
+    old_ids={n['id'] for n in before['news']}
+    assert [n for n in after['news'] if n['id'] in old_ids] == before['news']
+    assert all(n['day']==day and n['is_signal'] for n in after['news'] if n['id'] not in old_ids)
+    assert after['assets']==before['assets'] and after['player']==before['player']
     with server.conn() as db:
         dates = json.loads(db.execute('SELECT dates FROM breaking_plans WHERE room_id=?',(rid,)).fetchone()[0])
     assert dates[0] > day

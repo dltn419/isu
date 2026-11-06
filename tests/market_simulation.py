@@ -27,11 +27,12 @@ def simulate(seed, mood='neutral'):
     c.executescript('''
       CREATE TABLE news(id INTEGER PRIMARY KEY,room_id INTEGER,day INTEGER,title TEXT,body TEXT,sector TEXT,impact REAL DEFAULT 0,active INTEGER DEFAULT 1);
       CREATE TABLE orders(id INTEGER PRIMARY KEY);
-      CREATE TABLE prices(room_id INTEGER,day INTEGER,asset TEXT,price INTEGER,change REAL DEFAULT 0,open_price INTEGER,high_price INTEGER,low_price INTEGER);
+      CREATE TABLE prices(room_id INTEGER,day INTEGER,asset TEXT,price INTEGER,change REAL DEFAULT 0,open_price INTEGER,high_price INTEGER,low_price INTEGER,drivers TEXT);
     ''')
     engine.initialize_schema(c)
     c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(1,1,?,?,0)', [(a['id'], a['initial']) for a in server.ASSETS])
     engine.publish_news(c, 1, 1, seed, mood, server.ASSETS)
+    breaking_news.publish_clues(c,1,1,seed,mood,server.ASSETS)
     for day in range(2, 25):
         engine.evolve_businesses(c, 1, day, seed, server.ASSETS)
         engine.resolve_events(c, 1, day, seed, server.ASSETS)
@@ -39,6 +40,7 @@ def simulate(seed, mood='neutral'):
         reactions = engine.release_earnings(c, 1, day, seed, server.ASSETS)
         server.generate_prices(c, 1, day, seed, reactions,breaking)
         engine.publish_news(c, 1, day, seed, mood, server.ASSETS)
+        breaking_news.publish_clues(c,1,day,seed,mood,server.ASSETS)
     result = {}
     for a in server.ASSETS:
         bars = c.execute('SELECT price,change FROM prices WHERE asset=? ORDER BY day', (a['id'],)).fetchall()

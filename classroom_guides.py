@@ -18,8 +18,12 @@ def summarize(article, names):
             return f'{name}의 확인 일정이 {article.get("expected_start")}일차로 늦어졌어요. 매출 반영 시점과 준비 비용을 다시 살펴보세요.'
         result = '확인된 영업 효과' if status in ('confirmed','operating') else '회사가 제시한 전망'
         period = f'{article["expected_start"]}~{article.get("expected_end") or article["expected_start"]}일차' if article.get('expected_start') else '후속 발표'
-        return (f'{name}: {result}는 완전 가동 시 매출 {m["revenue_pct"]:+.1f}%, '
-                f'이익률 {m["margin_pp"]:+.2f}%p예요. {period}의 실제 운영과 분기 실적을 함께 확인해요.')
+        expectation=next((s.strip() for s in article['body'].split('. ') if '새로 확인된 수치와 일정은' in s or '새로 확인된 내용은 기존 기대와' in s),'')
+        return (f'{name}: {result}은 완전 가동 시 매출 {m["revenue_pct"]:+.1f}%, '
+                f'이익률 {m["margin_pp"]:+.2f}%p예요. {period}의 실제 운영과 분기 실적을 함께 확인해요.'
+                + (' '+expectation.rstrip('.')+'.' if expectation else ''))
+    if article.get('is_signal'):
+        return f'{name}의 협상·검토에 관한 미확정 취재예요. 가까운 시일의 후속 발표를 확인하고, 기대나 우려와 반대로 결론 날 가능성도 살펴보세요.'
     if article['kind'] == 'earnings':
         return '20개 기업의 분기 실적이 공개됐어요. 당초 예상, 발표 직전 기대, 실제 이익을 나란히 비교해 보세요.'
     text = article['body'].split('. ')[0]
@@ -30,7 +34,7 @@ def digest(data, limit=5):
     day = data['room']['day']
     candidates = [n for n in data['news'] if n['day']==day and n['kind']!='briefing']
     def priority(n):
-        return (100 if n.get('is_breaking') else 50 if n['kind']=='earnings' else 35 if n['certainty']=='사실 확인' else
+        return (100 if n.get('is_breaking') else 50 if n['kind']=='earnings' else 40 if n.get('is_signal') else 35 if n['certainty']=='사실 확인' else
                 25 if n['certainty']=='일정 조정' else 20 if n['kind']=='company' else 5, n['id'])
     chosen, seen, companies = [], set(), set()
     for n in sorted(candidates,key=priority,reverse=True):

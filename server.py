@@ -74,6 +74,7 @@ AMAP={a['id']:a for a in ASSETS}
 FEE_POLICY={'rate':0.00015,'percent':0.015,'minimum':1,'rounding':'half_up','numerator':15,'denominator':100000}
 def trading_fee(gross):return max(1,(gross*15+50000)//100000)
 BOND_PRICE_PARAMETERS={'GOV':{'volatility':.65,'limit':5},'CORP':{'volatility':1.3,'limit':8},'JUNK':{'volatility':2,'limit':12}}
+NEWS_PRICING={'gain':2.5,'weights':(.6,.25,.15),'noise_scale':.75}
 
 def paid_fees(c,pid):
  return -one(c,"SELECT COALESCE(SUM(amount),0) n FROM ledgers WHERE player_id=? AND kind='fee'",(pid,))['n']
@@ -114,6 +115,7 @@ def init():
   columns={row[1] for row in c.execute('PRAGMA table_info(prices)')}
   for col in ('open_price','high_price','low_price'):
    if col not in columns:c.execute(f'ALTER TABLE prices ADD COLUMN {col} INTEGER')
+  if 'drivers' not in columns:c.execute('ALTER TABLE prices ADD COLUMN drivers TEXT')
   if 'mood' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
   engine.initialize_schema(c)
@@ -133,6 +135,7 @@ def init():
    bond_income.migrate_room(c,room,ASSETS)
   for room in c.execute("SELECT * FROM rooms WHERE phase!='finished'").fetchall():
    breaking_news.ensure_plan(c,room['id'],room['seed'],not_before=room['day']+1)
+   breaking_news.publish_clues(c,room['id'],room['day'],room['seed'],room['mood'],ASSETS)
   # Preserve game progress; only earned bond interest is added by the one-time migration.
 init()
 
@@ -169,12 +172,21 @@ def record_all(c,rid,day):
  for p in rows(c,'SELECT id,cash FROM players WHERE room_id=?',(rid,)):
   c.execute('INSERT OR REPLACE INTO daily_values(room_id,player_id,day,net,cash) VALUES(?,?,?,?,?)',(rid,p['id'],day,snapshot_value(c,p['id'],rid,day),p['cash']))
 
+def room_rankings(c,r):
+ scores={}
+ for p in rows(c,'SELECT id FROM players WHERE room_id=?',(r['id'],)):
+  adjustment=one(c,"SELECT COALESCE(SUM(amount),0) amount FROM ledgers WHERE player_id=? AND kind='teacher'",(p['id'],))['amount']
+  scores[p['id']]=snapshot_value(c,p['id'],r['id'],r['day'])-r['start_cash']-adjustment
+ return {pid:{'rank':1+sum(other>score for other in scores.values()),'total':len(scores),
+               'tied':sum(other==score for other in scores.values())>1,'basis':'investment_return'} for pid,score in scores.items()}
+
 
 # Business events, public news and quarterly accounts share one persistent model.
 MOODS=engine.MOOD_NAMES
 
 def publish_dynamic_news(c,rid,day,seed,mood):
  engine.publish_news(c,rid,day,seed,mood,ASSETS)
+ breaking_news.publish_clues(c,rid,day,seed,mood,ASSETS)
 
 class CreateRoom(BaseModel):
  name:str=Field(min_length=2,max_length=50)
@@ -205,7 +217,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'14.0-breaking-news'}
+ return {'ok': True,'version':'15.0-news-and-rank'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -272,13 +284,15 @@ def state(authorization:str|None=Header(None)):
   c.execute('BEGIN')
   r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood,generation,bond_interest_version FROM rooms WHERE id=?',(s['room_id'],)))
   engine.ensure_room(c,r['id'],one(c,'SELECT seed FROM rooms WHERE id=?',(r['id'],))['seed'],r['day'],ASSETS)
-  prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
+  prices=rows(c,'SELECT asset,price,change,drivers FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
+  for price in prices:price['price_context']=json.loads(price.pop('drivers') or 'null')
   price_map={x['asset']:x for x in prices}
   out={'room':r,'role':s['role'],'assets':[{**a,**price_map.get(a['id'],{})} for a in ASSETS],
-       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
+       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking,is_signal FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
   out['fee_policy']=FEE_POLICY
   out['bond_policy']=bond_income.policy(r)
+  rankings=room_rankings(c,r)
   out.update(engine.public_data(c,r['id'],r['day']))
   for n in out['news']:
    n['related_assets']=json.loads(n['related_assets'])
@@ -290,6 +304,7 @@ def state(authorization:str|None=Header(None)):
    orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
    out.update(learning_data(c,pid,r['id']))
    out['bond_income']=bond_income.summary(c,pid)
+   out['ranking']=rankings[pid]
    p['fees_paid']=paid_fees(c,pid)
    p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],pid,r['day'])))
    p['net']=snapshot_value(c,pid,r['id'],r['day']); p['profit']=p['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
@@ -299,6 +314,7 @@ def state(authorization:str|None=Header(None)):
   else:
    out['participants']=rows(c,'SELECT id,name,cash FROM players WHERE room_id=? ORDER BY id',(r['id'],))
    for p in out['participants']:
+    p['ranking']=rankings[p['id']]
     p['fees_paid']=paid_fees(c,p['id'])
     p['net']=snapshot_value(c,p['id'],r['id'],r['day'])
     p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],p['id'],r['day'])))
@@ -324,7 +340,7 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
   player['fees_paid']=paid_fees(c,pid)
   player['net']=snapshot_value(c,pid,r['id'],r['day'])
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
-  return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),'bond_income':bond_income.summary(c,pid),
+  return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),'bond_income':bond_income.summary(c,pid),'ranking':room_rankings(c,r)[pid],
     'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
     'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
@@ -497,27 +513,40 @@ def close_market(authorization:str|None=Header(None),x_haru_game_generation:int|
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   return close_trading_day(c,r)
 
+def news_contribution(n,day):
+ lag=day-n['day']
+ if n['pricing_end'] is not None and day>n['pricing_end']:return 0
+ if n['pricing_version']==1:return n['impact'] if lag==1 else 0
+ weights=NEWS_PRICING['weights'][:max(0,min(3,24-n['day']))]
+ return n['impact']*NEWS_PRICING['gain']*weights[lag-1]/sum(weights) if 1<=lag<=len(weights) else 0
+
 def generate_prices(c,rid,day,seed,earnings=None,breaking=None):
  rng=random.Random(seed+day*10007)
  previous={p['asset']:p['price'] for p in rows(c,'SELECT asset,price FROM prices WHERE room_id=? AND day=?',(rid,day-1))}
- effects=rows(c,'SELECT sector,impact,title FROM news WHERE room_id=? AND day=? AND active=1',(rid,day-1))
+ effects=rows(c,'SELECT id,day,sector,impact,pricing_version,pricing_end FROM news WHERE room_id=? AND day BETWEEN ? AND ? AND active=1',(rid,max(1,day-3),day-1))
  market=rng.gauss(0,1.5)
  # A quarter-long common shock preserves meaningful market risk after diversification.
  regime=random.Random(seed+((day-2)//6)*4721+16127).gauss(0,.72)
  sectors={s:rng.gauss(0,1.5) for s in ['기술','항공','식품','의료·제약','미래사업']}
- rets={}
+ rets={};drivers={}
  for a in ASSETS:
   id=a['id'];risk=a['risk'];old=previous[id]
   if a['type']=='stock':
    vol={'stable':.85,'growth':1.9,'high':3.8}[risk]
-   news=sum(e['impact'] for e in effects if e['sector'] in ('전체',a['sector'],id))
+   relevant=[e for e in effects if e['sector'] in ('전체',a['sector'],id) and news_contribution(e,day)]
+   news=sum(news_contribution(e,day) for e in relevant)
    annual_carry=engine.MARKET_ANNUAL_CARRY+{'stable':-.02,'growth':.02,'high':.06}[risk]
    carry=((1+annual_carry)**(1/engine.TRADING_INTERVALS)-1)*100
    beta={'stable':.8,'growth':1,'high':1.15}[risk]
-   ret=carry+beta*(market+regime)+sectors[a['sector']]*.5+news+(earnings or {}).get(id,0)+rng.gauss(0,vol)
+   noise=beta*(market+regime)+sectors[a['sector']]*.5+rng.gauss(0,vol)
+   earned=(earnings or {}).get(id,0)
+   ret=carry+NEWS_PRICING['noise_scale']*noise+news+earned
    cap={'stable':7,'growth':12,'high':20}[risk]
    ret=max(-cap,min(cap,ret))
-   if id in (breaking or {}):ret=max(-35,min(35,breaking[id]))
+   drivers[id]={'news':news,'earnings':earned,'news_ids':[e['id'] for e in relevant],'breaking':False}
+   if id in (breaking or {}):
+    ret=max(-35,min(35,breaking[id]))
+    drivers[id]={'news':ret,'earnings':0,'news_ids':[n['id'] for n in rows(c,'SELECT id FROM news WHERE room_id=? AND day=? AND sector=? AND is_breaking=1',(rid,day,id))],'breaking':True}
   elif a['type']=='gold':
    ret=max(-10,min(10,rng.gauss(0,1.7)-market*.25))
   elif a['type']=='bond':
@@ -550,6 +579,9 @@ def generate_prices(c,rid,day,seed,earnings=None,breaking=None):
   high=max(opening,price)+wiggle
   low=max(1,min(opening,price)-wiggle)
   c.execute('INSERT INTO prices(room_id,day,asset,price,change,open_price,high_price,low_price) VALUES(?,?,?,?,?,?,?,?)',(rid,day,asset,price,round(change,4),opening,high,low))
+  if asset in drivers:
+   info=drivers[asset];info['other']=change-info['news']-info['earnings']
+   c.execute('UPDATE prices SET drivers=? WHERE room_id=? AND day=? AND asset=?',(json.dumps(info),rid,day,asset))
 
 def start_trading_day(c,r):
  rid=r['id']
@@ -675,7 +707,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'14.0-breaking-news'}
+def health():return {'ok':True,'db':str(DB.name),'version':'15.0-news-and-rank'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -805,13 +837,14 @@ def demo_state():
   c.executescript('''
    CREATE TABLE news(id INTEGER PRIMARY KEY,room_id INTEGER,day INTEGER,title TEXT,body TEXT,sector TEXT,impact REAL DEFAULT 0,active INTEGER DEFAULT 1);
    CREATE TABLE orders(id INTEGER PRIMARY KEY);
-   CREATE TABLE prices(room_id INTEGER,day INTEGER,asset TEXT,price INTEGER,change REAL DEFAULT 0,open_price INTEGER,high_price INTEGER,low_price INTEGER);
+   CREATE TABLE prices(room_id INTEGER,day INTEGER,asset TEXT,price INTEGER,change REAL DEFAULT 0,open_price INTEGER,high_price INTEGER,low_price INTEGER,drivers TEXT);
   ''')
   engine.initialize_schema(c)
   seed=62171;rid=1
   c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
   engine.publish_news(c,rid,1,seed,'neutral',ASSETS)
   breaking_news.ensure_plan(c,rid,seed)
+  breaking_news.publish_clues(c,rid,1,seed,'neutral',ASSETS)
   for day in range(2,7):
    engine.evolve_businesses(c,rid,day,seed,ASSETS)
    engine.resolve_events(c,rid,day,seed,ASSETS)
@@ -819,9 +852,11 @@ def demo_state():
    reactions=engine.release_earnings(c,rid,day,seed,ASSETS)
    generate_prices(c,rid,day,seed,reactions,breaking)
    engine.publish_news(c,rid,day,seed,'neutral',ASSETS)
-  price_map={x['asset']:x for x in rows(c,'SELECT asset,price,change FROM prices WHERE day=6')}
+   breaking_news.publish_clues(c,rid,day,seed,'neutral',ASSETS)
+  price_map={x['asset']:{**dict(x),'price_context':json.loads(x['drivers'] or 'null')} for x in rows(c,'SELECT asset,price,change,drivers FROM prices WHERE day=6')}
+  for p in price_map.values():p.pop('drivers',None)
   assets=[{**a,**price_map[a['id']]} for a in ASSETS]
-  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking FROM news ORDER BY day DESC,id DESC')
+  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking,is_signal FROM news ORDER BY day DESC,id DESC')
   for n in news:
    n['related_assets']=json.loads(n['related_assets'])
    n['metrics']=json.loads(n['metrics'])
@@ -839,6 +874,7 @@ def demo_state():
    'histories':histories,**engine.public_data(c,rid,6)}
   out['bond_policy']=bond_income.policy({**out['room'],'bond_interest_version':2})
   out['bond_income']={'unpaid':0,'paid':0,'items':[]}
+  out['ranking']={'rank':3,'total':6,'tied':False,'basis':'investment_return'}
   out.update(guides.public_guides(out,{'start_day':4,'end_day':6,'source':'우리 반 실제 체결','ranking':'체결금액','items':[]}))
   return out
  finally:c.close()

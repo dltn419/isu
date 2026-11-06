@@ -52,11 +52,16 @@ async function build(role) {
       ['home','news','earnings','market','bank','players','orders','admin'];
     for(const destination of destinations) {
       w.go(destination);
+      if(role==='student')assert.ok(d.querySelector('.ranking-chip').textContent.includes(fixture.student.ranking.rank+'위'),destination+' rank');
+      else assert.equal(d.querySelector('.ranking-chip'),null,'teacher has no personal rank');
       assert.ok(d.querySelector('#page').innerHTML.length>100, role+' '+destination);
       assert.ok(!/NaN|undefined/.test(d.querySelector('#page').textContent), role+' '+destination+' invalid output');
       assert.equal(d.querySelectorAll('.side-nav button.active').length,1);
     }
     await w.detail('HBEL');
+    assert.ok(d.querySelector('.price-explanation'),'current price explanation');
+    assert.equal(d.querySelectorAll('.price-factors>div').length,3);
+    assert.equal(d.querySelector('.price-explanation').open,false);
     assert.equal(d.querySelector('.company-tabs button.active').textContent,'뉴스·사업');
     if(role==='student'){
     d.querySelector('#qty').value='3';
@@ -121,6 +126,8 @@ async function build(role) {
       await Promise.all([w.adminAction('advance'),w.adminAction('advance')]);
       assert.equal(calls.filter(c=>c.url==='/api/admin/advance').length,1);
       w.eval("tab='preview'");await w.loadPreview(fixture.teacher.participants[0].id);
+      assert.ok(d.querySelector('.ranking-chip').textContent.includes('학생 순위'));
+      assert.ok(d.querySelector('.ranking-chip').textContent.includes(fixture.preview.ranking.rank+'위'));
       assert.equal(d.querySelectorAll('.preview-menu button').length,4);
       for(const destination of ['home','news','earnings','market','portfolio','journal','bank','orders']) {
         w.go(destination);
@@ -131,6 +138,7 @@ async function build(role) {
       [...d.querySelectorAll('.side-nav button')].find(b=>b.textContent.includes('시장 보기')).click();
       assert.equal(d.querySelector('.preview-banner'),null,'teacher market leaves student preview');
       assert.ok(d.querySelector('#market-results'));
+      assert.equal(d.querySelector('.ranking-chip'),null);
       await w.detail('GOV');assert.ok(d.querySelector('.teacher-market-panel .bond-terms'));
       assert.equal(d.querySelector('#qty'),null);
       w.goTeacher('bank');assert.equal(d.querySelectorAll('.deposit-catalog article').length,4);
@@ -172,14 +180,28 @@ async function build(role) {
     assert.ok(d.querySelector('[role="dialog"] .certainty.breaking'));
     w.closeModal();w.go('news');
     assert.ok(d.querySelector('.breaking-article .certainty.breaking'));
+    await w.detail(article.sector);
+    assert.ok(d.querySelector('.price-explanation').textContent.includes('속보는 오늘 시작 가격'));
+    assert.ok(d.querySelector('.price-evidence').textContent.includes(article.title));
     w.eval('S.room.day++;render()');
     assert.equal(d.querySelector('.breaking-banner'),null,'yesterday news does not repeat the alert');
     assert.deepEqual(errors,[],'breaking news UI script errors');
     dom.window.close();
     console.log('breaking news: banner, article, archive and next-day dismissal passed');
   }
+  if(fixture.clue_student){
+    const {dom,w,errors}=await build('clue_student'),d=w.document;
+    const article=fixture.clue_student.news.find(n=>n.is_signal);
+    assert.ok(article);assert.equal(d.querySelector('.breaking-banner'),null);
+    await w.openArticle(article.id);
+    assert.ok(d.querySelector('[role="dialog"]').textContent.includes('취재·미확정'));
+    assert.ok(d.querySelector('[role="dialog"]').textContent.includes('반대로'));
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('clue news: unconfirmed evidence without a guaranteed breaking alert passed');
+  }
   const {dom,w,errors}=await build('demo');
   await w.startDemo();
+  assert.ok(w.document.querySelector('.ranking-chip').textContent.includes('3위'));
   assert.equal(w.document.querySelectorAll('.side-nav button').length,4);
   await w.detail('HBEL');
   assert.equal(w.document.querySelector('.trade-submit').disabled,true);

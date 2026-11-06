@@ -8,6 +8,7 @@ import breaking_news
 
 
 ROOM_TABLES = (
+    'breaking_cases',
     'breaking_releases', 'breaking_plans',
     'bond_accruals', 'bond_payments',
     'reading_log', 'investment_notes', 'day_ready', 'daily_values',
@@ -67,6 +68,7 @@ def reset_room(c, room, assets, timestamp):
                   [(rid, a['id'], a['initial']) for a in assets])
     engine.publish_news(c, rid, 1, seed, 'neutral', assets)
     breaking_news.ensure_plan(c,rid,seed)
+    breaking_news.publish_clues(c,rid,1,seed,'neutral',assets)
     c.execute('''INSERT INTO daily_values(room_id,player_id,day,net,cash)
                  SELECT room_id,id,1,cash,cash FROM players WHERE room_id=?''', (rid,))
     c.execute('INSERT INTO logs(room_id,day,event,detail) VALUES(?,1,?,?)',

@@ -30,8 +30,8 @@ def paths(games, volatility, limit):
     c = sqlite3.connect(':memory:')
     c.row_factory = sqlite3.Row
     c.executescript('''CREATE TABLE prices(room_id INTEGER,day INTEGER,asset TEXT,price INTEGER,
-      change REAL,open_price INTEGER,high_price INTEGER,low_price INTEGER,PRIMARY KEY(room_id,day,asset));
-      CREATE TABLE news(room_id INTEGER,day INTEGER,sector TEXT,impact REAL,title TEXT,active INTEGER);''')
+      change REAL,open_price INTEGER,high_price INTEGER,low_price INTEGER,drivers TEXT,PRIMARY KEY(room_id,day,asset));
+      CREATE TABLE news(id INTEGER PRIMARY KEY,room_id INTEGER,day INTEGER,sector TEXT,impact REAL,title TEXT,active INTEGER,pricing_version INTEGER DEFAULT 1,pricing_end INTEGER);''')
     try:
         result = []
         for i in range(games):

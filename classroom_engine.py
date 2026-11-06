@@ -107,6 +107,10 @@ def initialize_schema(c):
     CREATE TABLE IF NOT EXISTS breaking_releases(
       room_id INTEGER NOT NULL,slot INTEGER NOT NULL,day INTEGER NOT NULL,news_id INTEGER NOT NULL,
       asset TEXT NOT NULL,shock REAL NOT NULL,PRIMARY KEY(room_id,slot),UNIQUE(room_id,day));
+    CREATE TABLE IF NOT EXISTS breaking_cases(
+      room_id INTEGER NOT NULL,slot INTEGER NOT NULL,asset TEXT NOT NULL,warning_day INTEGER NOT NULL,
+      has_hint INTEGER NOT NULL,signal_direction INTEGER,clue_news_id INTEGER,
+      PRIMARY KEY(room_id,slot),UNIQUE(room_id,asset));
     ''')
     columns = {x[1] for x in c.execute('PRAGMA table_info(news)')}
     for col, ddl in {
@@ -114,7 +118,8 @@ def initialize_schema(c):
         'certainty': "TEXT NOT NULL DEFAULT '보도'", 'event_id': 'INTEGER',
         'related_assets': "TEXT NOT NULL DEFAULT '[]'", 'lens': "TEXT NOT NULL DEFAULT ''",
         'horizon': "TEXT NOT NULL DEFAULT 'short'", 'expected_start': 'INTEGER', 'expected_end': 'INTEGER',
-        'is_breaking': 'INTEGER NOT NULL DEFAULT 0'
+        'is_breaking': 'INTEGER NOT NULL DEFAULT 0', 'is_signal': 'INTEGER NOT NULL DEFAULT 0',
+        'pricing_version': 'INTEGER NOT NULL DEFAULT 1', 'pricing_end': 'INTEGER'
     }.items():
         if col not in columns:
             c.execute(f'ALTER TABLE news ADD COLUMN {col} {ddl}')
@@ -163,8 +168,8 @@ def ensure_room(c, rid, seed, day, assets):
 def article(c, rid, day, title, body, target, impact=0, *, kind='company',
             source='하루경제', certainty='전망', event_id=None, related=None, lens='',
             horizon='short', expected_start=None, expected_end=None, metrics=None):
-    cur = c.execute('''INSERT INTO news(room_id,day,title,body,sector,impact,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+    cur = c.execute('''INSERT INTO news(room_id,day,title,body,sector,impact,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,pricing_version)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,2)''',
                     (rid, day, title, body, target, round(impact, 3), kind, source,
                      certainty, event_id, json.dumps(related or [], ensure_ascii=False), lens,
                      horizon, expected_start, expected_end,json.dumps(metrics or {},ensure_ascii=False)))
@@ -322,6 +327,9 @@ def resolve_events(c, rid, day, seed, assets):
             old_state = c.execute('SELECT * FROM event_expectations WHERE event_id=?',(e['id'],)).fetchone()
             impact = expectations.revise_event(c,rid,e['id'],a['id'],day,metrics,day,actual_end,horizon,
                       weight=1,prep_start=old_state['prep_start'],prep_end=min(day-1,old_state['prep_end']))
+            body += (' 새로 확인된 수치와 일정은 기존 기대를 높이는 내용입니다. ' if impact > .05 else
+                     ' 새로 확인된 수치와 일정은 기존 기대를 낮추는 내용입니다. ' if impact < -.05 else
+                     ' 새로 확인된 내용은 기존 기대와 큰 차이가 없습니다. ')
         body += '다른 주문과 비용도 함께 작용하므로 이 소식 하나만으로 이익이나 주가를 단정할 수 없습니다.'
         c.execute("UPDATE business_events SET stage=?,result=?,resolved_day=? WHERE id=?", ('confirmed' if realized else 'reversed',result,day,e['id']))
         article(c, rid, day, f'{a["name"]}, {e["title"]} ' + ('진전 확인' if direction > 0 else '차질 확인'),
@@ -369,6 +377,7 @@ def publish_news(c, rid, day, seed, mood, assets):
             title = f'{a["name"]}, {subject} ' + ('기대 커져' if direction > 0 else '불확실성 확대')
             body = (f'{a["name"]}이(가) 새로운 사업 전망을 공개했습니다. ' + expectations.metric_sentence(metrics) + '아직 확정 실적이 아닌 회사의 전망입니다. '
                     f'{due}일차 전후에 진행 상황을 점검합니다. ' + horizon_sentence(horizon,expected,end) + ' 일정이나 결과는 달라질 수 있습니다. ')
+            body += ' 새 정보에 대한 가격 반응은 앞으로 1~3거래일에 나뉘어 반영될 수 있으며 시장 흐름도 함께 작용합니다. '
             body += ('성장 기회가 있지만 초기 비용이 늘 수 있다는 반론도 나왔습니다.' if mixed else LENSES[kind])
             if horizon != 'short' and kind in ('research','contract','supply'):
                 body += f' 준비 기간인 {day+1}~{expected-1}일차에는 이익률 {metrics["preparation_margin_pp"]:+.2f}%p의 준비·연구 비용이 먼저 발생할 수 있습니다.'
@@ -424,7 +433,7 @@ def publish_news(c, rid, day, seed, mood, assets):
 def earnings_evidence(c,rid,asset,day):
     # Include an old announcement if its actual operating effect belongs to this quarter.
     return query(c,'''SELECT DISTINCT n.id,n.title FROM news n WHERE n.room_id=? AND n.sector=? AND n.day<=?
-                     AND n.kind IN ('company','followup') AND (n.day>=? OR n.event_id IN (
+                     AND n.kind IN ('company','followup','signal') AND (n.day>=? OR n.event_id IN (
                        SELECT event_id FROM operating_effects WHERE room_id=? AND asset=?
                        AND start_day<=? AND end_day>=? AND event_id IS NOT NULL))
                      ORDER BY n.day DESC,n.id DESC LIMIT 8''', (rid,asset,day,day-5,rid,asset,day,day-5))
