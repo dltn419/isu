@@ -60,6 +60,12 @@ COMPANY_DESCRIPTIONS = {
 for a in ASSETS:
  a['description']=COMPANY_DESCRIPTIONS.get(a['id'], '여러 기업에 분산 투자하는 상품입니다.' if a['type']=='etf' else '가격과 위험이 변할 수 있는 가상 금융상품입니다.')
 
+BOND_DESCRIPTIONS={
+ 'GOV':'정부에 돈을 빌려주는 채권입니다. 세 채권 중 가격 변동이 작지만, 중간에 팔면 손실이 날 수 있습니다.',
+ 'CORP':'우량 기업에 돈을 빌려주는 채권입니다. 국채보다 이자가 높고 가격 변동도 더 큽니다.',
+ 'JUNK':'높은 이자를 주는 고위험 채권입니다. 가격 변동이 커서 이자를 받아도 전체 수익은 마이너스일 수 있습니다.'}
+for a in ASSETS:
+ if a['id'] in BOND_DESCRIPTIONS:a['description']=BOND_DESCRIPTIONS[a['id']]
 AMAP={a['id']:a for a in ASSETS}
 # 0.015% per fill, integer half-up rounding, at least 1 game won.
 # A common teaching rate for traded assets; deposits and taxes are excluded.
@@ -137,6 +143,11 @@ def admin(auth):
  if s['role']!='admin':err('관리자만 가능합니다.',403)
  return s
 
+def holding_rows(c,pid):
+ data=rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,))
+ for h in data:h['average_cost']=h['cost']/h['qty'] if h['qty'] else 0
+ return data
+
 def snapshot_value(c,pid,rid,day):
  p=one(c,'SELECT cash FROM players WHERE id=?',(pid,))
  h=rows(c,'SELECT * FROM holdings WHERE player_id=?',(pid,))
@@ -184,7 +195,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'10.0-new-game'}
+ return {'ok': True,'version':'11.0-market-review'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -262,7 +273,7 @@ def state(authorization:str|None=Header(None)):
    n['metrics']=json.loads(n['metrics'])
   if s['role']=='player':
    pid=s['player_id']; p=dict(one(c,'SELECT id,name,cash FROM players WHERE id=?',(pid,)))
-   holdings=rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,))
+   holdings=holding_rows(c,pid)
    deposits=rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))
    orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
    out.update(learning_data(c,pid,r['id']))
@@ -300,7 +311,7 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
   player['fees_paid']=paid_fees(c,pid)
   player['net']=snapshot_value(c,pid,r['id'],r['day'])
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
-  return {**learning_data(c,pid,r['id']),'player':player,'holdings':rows(c,'SELECT asset,qty,cost FROM holdings WHERE player_id=? ORDER BY asset',(pid,)),
+  return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),
     'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
     'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
@@ -658,7 +669,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'10.0-new-game'}
+def health():return {'ok':True,'db':str(DB.name),'version':'11.0-market-review'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):

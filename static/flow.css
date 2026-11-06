@@ -231,3 +231,20 @@ body { font-size:15px; line-height:1.65; }
 @media(max-width:760px) { .reset-summary { grid-template-columns:1fr; } }
 
 .reset-controls .btn.red,#reset-submit { background:#9e4541; color:white; }
+
+.holding-prices { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:13px 0; }
+.holding-prices>div { border:1px solid var(--border); background:#f7faf7; border-radius:9px; padding:11px; }
+.holding-prices span,.holding-prices small { display:block; font-size:12px; color:#526b5d; }
+.holding-prices b { display:block; font-size:17px; margin:4px 0; color:var(--ink); }
+.position-average { padding:11px 0; display:flex; justify-content:space-between; gap:12px; font-size:14px; border-bottom:1px solid var(--border); }
+.position-average small { display:block; color:#5c7265; font-size:11px; }
+.bond-terms { padding:13px 14px; background:#f0f6ee; border:1px solid #d8e5d2; border-radius:9px; margin:13px 0; }
+.bond-terms>b { display:block; font-size:13px; margin-bottom:8px; }
+.bond-terms>div { display:flex; justify-content:space-between; gap:12px; font-size:13px; padding:3px 0; }
+.bond-terms p { font-size:12px; line-height:1.75; color:#526c51; margin:9px 0 0; }
+.teacher-market-panel { position:sticky; top:85px; }
+.teacher-market-panel .notice { margin:18px 0; }
+@media(max-width:850px) { .teacher-market-panel { position:static; } }
+@media(max-width:760px) { .holding-prices b { font-size:16px; } }
+
+.deposit-catalog{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:20px}.deposit-catalog article{border:1px solid var(--border);border-radius:10px;padding:17px}.deposit-catalog article>b{color:#28694e}.deposit-catalog p{font-size:14px;margin:8px 0}@media(max-width:760px){.deposit-catalog{grid-template-columns:1fr}}

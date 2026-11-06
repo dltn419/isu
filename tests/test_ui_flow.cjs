@@ -46,10 +46,10 @@ async function build(role) {
     const d = w.document;
     const mainLabels = [...d.querySelectorAll('.side-nav .nav-text')].map(n=>n.textContent);
     assert.deepEqual(mainLabels, role==='student' ?
-      ['오늘의 소식','투자하기','내 자산','투자 기록'] : ['수업 진행','학생 현황','운영 설정']);
+      ['오늘의 소식','투자하기','내 자산','투자 기록'] : ['수업 진행','시장 보기','학생 현황','운영 설정']);
     const destinations = role==='student' ?
       ['home','news','earnings','market','portfolio','journal','bank','orders'] :
-      ['home','news','earnings','market','players','orders','admin'];
+      ['home','news','earnings','market','bank','players','orders','admin'];
     for(const destination of destinations) {
       w.go(destination);
       assert.ok(d.querySelector('#page').innerHTML.length>100, role+' '+destination);
@@ -58,6 +58,7 @@ async function build(role) {
     }
     await w.detail('HBEL');
     assert.equal(d.querySelector('.company-tabs button.active').textContent,'뉴스·사업');
+    if(role==='student'){
     d.querySelector('#qty').value='3';
     d.querySelector('#reason').value='같은 기업의 실적을 더 확인하겠다';
     w.updateOrderTotal();
@@ -75,6 +76,11 @@ async function build(role) {
     assert.equal(d.querySelector('#settlementLabel').textContent,'받을 금액');
     assert.equal(d.querySelector('.trade-submit').textContent,'매도하고 이유 저장');
     assert.ok(d.querySelector('.fee-disclosure').textContent.includes('0.015%'));
+    }else{
+      assert.ok(d.querySelector('.teacher-market-panel'));assert.equal(d.querySelector('.trade-submit'),null);
+      d.querySelectorAll('.company-tabs button')[1].click();
+      assert.equal(d.querySelectorAll('.main-financials>.financial-tile').length,3);
+    }
     if(role==='student') {
       w.eval('S.player.day_ready=true;render()');
       assert.equal(d.querySelector('.trade-submit').disabled,false);
@@ -82,6 +88,9 @@ async function build(role) {
       await w.place();
       assert.ok(confirmation.includes('수수료 (0.015%)'));
       assert.ok(confirmation.includes('받을 금액'));
+      assert.ok(d.querySelector('.position-average').textContent.includes('평균매수가'));
+      w.go('portfolio');assert.ok(d.querySelector('.holding-prices').textContent.includes('평균매수가'));
+      assert.ok(d.querySelector('.holding-prices').textContent.includes('현재가'));
       w.go('journal');
       assert.equal(d.querySelectorAll('.note-card').length,1, 'linked trade appears once');
       assert.ok(d.querySelector('.record-trade-cost').textContent.includes('수수료'));
@@ -97,7 +106,7 @@ async function build(role) {
       assert.ok(d.querySelector('[role="dialog"]'));
       w.closeModal();
     } else {
-      assert.equal(d.querySelector('.trade-submit').disabled,true);
+      assert.ok(d.querySelector('.teacher-market-panel'));
       w.go('admin');assert.ok(d.querySelector('.reset-controls'));
       w.resetGameModal();assert.equal(d.querySelector('#reset-submit').disabled,true);
       const confirmation=d.querySelector('#reset-confirm');confirmation.value='틀린 글';confirmation.dispatchEvent(new w.Event('input',{bubbles:true}));
@@ -119,6 +128,12 @@ async function build(role) {
       }
       await w.detail('HBEL');
       assert.equal(d.querySelector('.trade-submit').disabled,true);
+      [...d.querySelectorAll('.side-nav button')].find(b=>b.textContent.includes('시장 보기')).click();
+      assert.equal(d.querySelector('.preview-banner'),null,'teacher market leaves student preview');
+      assert.ok(d.querySelector('#market-results'));
+      await w.detail('GOV');assert.ok(d.querySelector('.teacher-market-panel .bond-terms'));
+      assert.equal(d.querySelector('#qty'),null);
+      w.goTeacher('bank');assert.equal(d.querySelectorAll('.deposit-catalog article').length,4);
     }
     assert.deepEqual(errors,[],role+' script errors');
     console.log(role+': menus, analysis tabs, record links, fee display and access passed');
