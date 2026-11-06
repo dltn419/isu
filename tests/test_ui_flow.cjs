@@ -143,6 +143,11 @@ async function build(role) {
       assert.equal(d.querySelector('.guide-help').open,false);
       await w.openArticle(fixture.student.news[0].id);
       assert.ok(d.querySelector('[role="dialog"]'));
+      const article=fixture.student.news[0];
+      assert.equal(d.querySelector('[role="dialog"] h2').textContent,article.reading?.title||article.title);
+      assert.ok(d.querySelector('.easy-article p'));
+      assert.equal(d.querySelector('.article-extra')?.open||false,false);
+      if(d.querySelector('.article-history'))assert.equal(d.querySelector('.article-history').open,false);
       w.closeModal();
     } else {
       assert.ok(d.querySelector('.teacher-market-panel'));
@@ -232,7 +237,7 @@ async function build(role) {
     const article=fixture.breaking_student.news.find(n=>n.is_breaking&&n.day===fixture.breaking_student.room.day);
     assert.ok(article,'a current-day breaking fixture');
     assert.equal(d.querySelectorAll('.breaking-banner').length,1);
-    assert.ok(d.querySelector('.breaking-banner').textContent.includes(article.title));
+    assert.ok(d.querySelector('.breaking-banner').textContent.includes(article.reading?.title||article.title));
     assert.ok(d.querySelector('.breaking-banner').textContent.includes('현재 가격에 반영'));
     d.querySelector('.breaking-title').click();await tick();
     assert.ok(d.querySelector('[role="dialog"] .certainty.breaking'));
@@ -240,7 +245,7 @@ async function build(role) {
     assert.ok(d.querySelector('.breaking-article .certainty.breaking'));
     await w.detail(article.sector);
     assert.ok(d.querySelector('.price-explanation').textContent.includes('속보는 오늘 시작 가격'));
-    assert.ok(d.querySelector('.price-evidence').textContent.includes(article.title));
+    assert.ok(d.querySelector('.price-evidence').textContent.includes(article.reading?.title||article.title));
     w.eval('S.room.day++;render()');
     assert.equal(d.querySelector('.breaking-banner'),null,'yesterday news does not repeat the alert');
     assert.deepEqual(errors,[],'breaking news UI script errors');
@@ -254,6 +259,7 @@ async function build(role) {
     await w.openArticle(article.id);
     assert.ok(d.querySelector('[role="dialog"]').textContent.includes('취재·미확정'));
     assert.ok(d.querySelector('[role="dialog"]').textContent.includes('반대로'));
+    assert.ok(d.querySelector('[role="dialog"] h2').textContent.includes('논의')||d.querySelector('[role="dialog"] h2').textContent.includes('살펴')||d.querySelector('[role="dialog"] h2').textContent.includes('확인')||d.querySelector('[role="dialog"] h2').textContent.includes('기대')||d.querySelector('[role="dialog"] h2').textContent.includes('늦어'));
     assert.deepEqual(errors,[]);dom.window.close();
     console.log('clue news: unconfirmed evidence without a guaranteed breaking alert passed');
   }

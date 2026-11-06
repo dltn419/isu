@@ -1,4 +1,4 @@
-"""하루금융 - classroom financial simulator (FastAPI + SQLite)."""
+"""24일 - classroom financial simulator (FastAPI + SQLite)."""
 import os, json, secrets, hashlib, sqlite3, random, math, datetime, io, base64, asyncio, logging
 from pathlib import Path
 from contextlib import contextmanager, asynccontextmanager, suppress
@@ -12,6 +12,7 @@ import game_reset
 import bond_income
 import breaking_news
 import classroom_progression as progression
+import news_reading
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -24,7 +25,7 @@ async def lifespan(app):
   task.cancel()
   with suppress(asyncio.CancelledError):await task
 
-app=FastAPI(title='하루금융', docs_url='/api/docs',lifespan=lifespan)
+app=FastAPI(title='24일', docs_url='/api/docs',lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=str(ROOT/'static')), name='static')
 
 COMPANIES=[
@@ -240,7 +241,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'17.0-classroom-clock'}
+ return {'ok': True,'version':'18.0-24days-clear-news'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -352,6 +353,7 @@ def state(authorization:str|None=Header(None)):
    out['reset_backup']=dict(backup) if (backup:=one(c,'SELECT id,created,from_day FROM game_reset_backups WHERE room_id=? ORDER BY created DESC,rowid DESC LIMIT 1',(r['id'],))) else None
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
    out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.price,o.fee,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
+  news_reading.enrich(out,engine.COMPANY_PROFILES)
   out.update(guides.public_guides(out,guides.market_activity(c,r['id'],r['day'])))
   return out
 @app.get('/api/admin/student/{pid}')
@@ -795,7 +797,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'17.0-classroom-clock'}
+def health():return {'ok':True,'db':str(DB.name),'version':'18.0-24days-clear-news'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -955,7 +957,7 @@ def demo_state():
    for bar in bars:
     for key in ('open','high','low'):bar[key]=bar[key] or bar['price']
     bar['reconstructed']=False
-  out={'demo':True,'role':'player','room':{'id':0,'name':'하루금융 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral','generation':0},
+  out={'demo':True,'role':'player','room':{'id':0,'name':'24일 체험 교실','code':'DEMO06','day':6,'phase':'trading','start_cash':100000,'mood':'neutral','generation':0},
    'fee_policy':FEE_POLICY,'deposit_policy':DEPOSIT_POLICY,'assets':assets,'news':news,'players_count':6,'player':{'fees_paid':0,'id':0,'name':'투자연구원','cash':56200,'net':net,'profit':net-100000,'day_ready':False},
    'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
    'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
@@ -963,6 +965,7 @@ def demo_state():
   out['bond_policy']=bond_income.policy({**out['room'],'bond_interest_version':2})
   out['bond_income']={'unpaid':0,'paid':0,'items':[]}
   out['ranking']={'rank':3,'total':6,'tied':False,'basis':'investment_return'}
+  news_reading.enrich(out,engine.COMPANY_PROFILES)
   out.update(guides.public_guides(out,{'start_day':4,'end_day':6,'source':'우리 반 실제 체결','ranking':'체결금액','items':[]}))
   return out
  finally:c.close()

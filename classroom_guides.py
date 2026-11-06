@@ -8,6 +8,7 @@ def metrics_of(article):
 
 
 def summarize(article, names):
+    if article.get('reading'):return article['reading']['summary']
     m = metrics_of(article)
     name = names.get(article['sector'],article['sector'])
     if m:
