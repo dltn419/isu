@@ -44,8 +44,28 @@ def main(output):
         for day in (1,2):advance(teacher,day)
         fixture['clue_student']=c.get('/api/state',headers=student).json()
         advance(teacher,3);fixture['breaking_student']=c.get('/api/state',headers=student).json()
+        teacher,student,code=new('24일의 투자 이야기')
+        second=c.post('/api/join',json={'code':code,'name':'분산하는 학생','pin':'1234'}).json()
+        other={'Authorization':'Bearer '+second['token']}
+        rid=c.get('/api/state',headers=teacher).json()['room']['id']
+        def roundtrip(who,aid,qty,ending_price):
+            buy(who,aid,qty)
+            with server.conn() as db:
+                db.execute('UPDATE prices SET price=? WHERE room_id=? AND day=1 AND asset=?',(ending_price,rid,aid))
+            result=c.post('/api/orders',headers=who,json={'asset':aid,'side':'sell','qty':qty,'reason':'기대와 실제 결과를 비교해 정리했어요'})
+            assert result.status_code==200,result.text
+        roundtrip(student,'HBEL',2,12000)
+        roundtrip(student,'NURA',2,6000)
+        roundtrip(other,'MKT',3,6000)
+        roundtrip(other,'TECH',3,4000)
+        buy(student,'MKT',5)
+        buy(other,'TECH',6)
+        for day in range(1,25):advance(teacher,day)
+        fixture['final_student']=c.get('/api/state',headers=student).json()
+        fixture['final_teacher']=c.get('/api/state',headers=teacher).json()
+        fixture['final_preview']=c.get('/api/admin/student/'+str(fixture['final_student']['player']['id']),headers=teacher).json()
         Path(output).write_text(json.dumps(fixture,ensure_ascii=False))
-        print('Created eight isolated UI fixtures.')
+        print('Created isolated trading, ETF and final-settlement UI fixtures.')
 
 
 if __name__=='__main__':main(sys.argv[1])

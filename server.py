@@ -13,6 +13,8 @@ import bond_income
 import breaking_news
 import classroom_progression as progression
 import news_reading
+import etf_portfolio
+import game_finale
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -78,6 +80,7 @@ BOND_DESCRIPTIONS={
  'JUNK':'높은 이자를 주는 고위험 채권입니다. 가격 변동이 커서 이자를 받아도 전체 수익은 마이너스일 수 있습니다.'}
 for a in ASSETS:
  if a['id'] in BOND_DESCRIPTIONS:a['description']=BOND_DESCRIPTIONS[a['id']]
+etf_portfolio.attach(ASSETS)
 AMAP={a['id']:a for a in ASSETS}
 # 0.015% per fill, integer half-up rounding, at least 1 game won.
 # A common teaching rate for traded assets; deposits and taxes are excluded.
@@ -145,6 +148,7 @@ def init():
   game_reset.initialize(c)
   bond_income.initialize(c)
   progression.initialize(c)
+  game_finale.initialize(c)
   if 'fee' not in {row[1] for row in c.execute('PRAGMA table_info(orders)')}:
    c.execute('ALTER TABLE orders ADD COLUMN fee INTEGER NOT NULL DEFAULT 0')
   if 'order_id' not in {row[1] for row in c.execute('PRAGMA table_info(investment_notes)')}:
@@ -241,7 +245,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'18.0-24days-clear-news'}
+ return {'ok': True,'version':'19.0-etf-final-settlement'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -319,6 +323,7 @@ def state(authorization:str|None=Header(None)):
   out['deposit_policy']=DEPOSIT_POLICY
   out['progression']=progression.snapshot(c,r)
   out['bond_policy']=bond_income.policy(r)
+  out['finale']=game_finale.public_report(c,r,ASSETS)
   rankings=room_rankings(c,r)
   out.update(engine.public_data(c,r['id'],r['day']))
   for n in out['news']:
@@ -328,7 +333,7 @@ def state(authorization:str|None=Header(None)):
    pid=s['player_id']; p=dict(one(c,'SELECT id,name,cash FROM players WHERE id=?',(pid,)))
    holdings=holding_rows(c,pid)
    deposits=[deposit_details(d,r['day']) for d in rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))]
-   orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
+   orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day,is_final_liquidation FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
    out.update(learning_data(c,pid,r['id']))
    out['bond_income']=bond_income.summary(c,pid)
    out['ranking']=rankings[pid]
@@ -352,7 +357,7 @@ def state(authorization:str|None=Header(None)):
    out['all_ready']=bool(out['participants']) and out['ready_count']==len(out['participants'])
    out['reset_backup']=dict(backup) if (backup:=one(c,'SELECT id,created,from_day FROM game_reset_backups WHERE room_id=? ORDER BY created DESC,rowid DESC LIMIT 1',(r['id'],))) else None
    out['logs']=rows(c,'SELECT day,event,detail FROM logs WHERE room_id=? ORDER BY id DESC LIMIT 40',(r['id'],))
-   out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.price,o.fee,o.status,o.reason,o.evidence_ids FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
+   out['all_orders']=rows(c,'SELECT o.id,p.name,o.asset,o.side,o.qty,o.price,o.fee,o.status,o.reason,o.evidence_ids,o.is_final_liquidation FROM orders o JOIN players p ON p.id=o.player_id WHERE o.room_id=? ORDER BY o.id DESC LIMIT 60',(r['id'],))
   news_reading.enrich(out,engine.COMPANY_PROFILES)
   out.update(guides.public_guides(out,guides.market_activity(c,r['id'],r['day'])))
   return out
@@ -371,7 +376,7 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
   return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),'bond_income':bond_income.summary(c,pid),'ranking':room_rankings(c,r)[pid],
     'deposits':[deposit_details(d,r['day']) for d in rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))],
-    'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
+    'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day,is_final_liquidation FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
     'values':rows(c,'SELECT day,net,cash FROM daily_values WHERE player_id=? ORDER BY day',(pid,))}
 
@@ -499,7 +504,7 @@ def close_deposit(did:int,authorization:str|None=Header(None),x_haru_game_genera
   r=one(c,'SELECT day,phase FROM rooms WHERE id=?',(s['room_id'],))
   if r['phase']!='trading':err('거래 가능한 시간에 해지하세요.')
   paid=deposit_details(d,r['day'])['early_paid']
-  c.execute("UPDATE deposits SET status='early',paid=? WHERE id=?",(paid,did))
+  c.execute("UPDATE deposits SET status='early',paid=?,closed_day=? WHERE id=?",(paid,r['day'],did))
   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,s['player_id']))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(s['room_id'],s['player_id'],r['day'],'deposit',paid,'예금 중도해지'))
   selection_resumed=resume_selection(c,s,r['day'])
@@ -532,6 +537,10 @@ def close_trading_day(c,r):
  c.execute("UPDATE rooms SET phase=? WHERE id=?",('finished' if r['day']==24 else 'closed',rid))
  progression.pause(c,rid,finished=r['day']==24)
  bond_income.close_day(c,r,ASSETS)
+ if r['day']==24:
+  # Freeze the last closing portfolio before automatic sales, including day-24 coupons.
+  record_all(c,rid,r['day'])
+  game_finale.settle(c,r,ASSETS,trading_fee,now())
  record_all(c,rid,r['day'])
  log(c,rid,r['day'],'close',f'마감: 체결 {filled}건, 거절 {rejected}건')
  return {'ok':True,'filled':filled,'rejected':rejected}
@@ -588,15 +597,7 @@ def generate_prices(c,rid,day,seed,earnings=None,breaking=None):
   else: continue
   price=max(1,round(old*(1+ret/100)))
   rets[id]=(price,(price/old-1)*100)
- def etf_return(sec):
-  inds=[x['id'] for x in ASSETS if x['type']=='stock' and (sec=='전체' or x['sector']==sec)]
-  if sec=='전체':
-   vals=[]
-   for sector in ['기술','항공','식품','의료·제약','미래사업']:
-    ids=[x['id'] for x in ASSETS if x['type']=='stock' and x['sector']==sector]
-    vals.append(sum(rets[k][1]*w for k,w in zip(ids,[.35,.35,.15,.15])))
-   return sum(vals)/5
-  return sum(rets[k][1]*w for k,w in zip(inds,[.35,.35,.15,.15]))
+ def etf_return(sec):return etf_portfolio.index_return(rets,ASSETS,sec)
  base=etf_return('전체')
  for a in ASSETS:
   if a['type']!='etf':continue
@@ -628,7 +629,7 @@ def start_trading_day(c,r):
  c.execute("UPDATE rooms SET day=?,phase='trading' WHERE id=?",(day,rid))
  for d in rows(c,"SELECT * FROM deposits WHERE room_id=? AND status='active' AND start_day+term-1<=?",(rid,day)):
   paid=d['principal']+round(d['principal']*d['rate'])
-  c.execute("UPDATE deposits SET status='matured',paid=? WHERE id=?",(paid,d['id']))
+  c.execute("UPDATE deposits SET status='matured',paid=?,closed_day=? WHERE id=?",(paid,day,d['id']))
   c.execute('UPDATE players SET cash=cash+? WHERE id=?',(paid,d['player_id']))
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,d['player_id'],day,'interest',paid,f"{d['term']}일 예금 만기 수령"))
  publish_dynamic_news(c,rid,day,r['seed'],r['mood'])
@@ -797,7 +798,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'18.0-24days-clear-news'}
+def health():return {'ok':True,'db':str(DB.name),'version':'19.0-etf-final-settlement'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -807,7 +808,7 @@ def resume_selection(c,s,day):
 def ensure_order_note(c,oid,rid,pid):
  existing=one(c,'SELECT id FROM investment_notes WHERE order_id=? AND room_id=? AND player_id=?',(oid,rid,pid))
  if existing:return existing['id']
- o=one(c,"SELECT * FROM orders WHERE id=? AND room_id=? AND player_id=? AND status='filled'",(oid,rid,pid))
+ o=one(c,"SELECT * FROM orders WHERE id=? AND room_id=? AND player_id=? AND status='filled' AND is_final_liquidation=0",(oid,rid,pid))
  if not o:err('거래 기록을 찾을 수 없습니다.',404)
  cur=c.execute('INSERT INTO investment_notes(room_id,player_id,day,asset,thesis,risk,horizon,evidence_ids,created,order_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
   (rid,pid,o['filled_day'],o['asset'],o['reason'],'','다음 실적 발표까지',o['evidence_ids'],o['created'],oid))

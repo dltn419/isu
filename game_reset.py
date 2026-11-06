@@ -8,6 +8,7 @@ import breaking_news
 
 
 ROOM_TABLES = (
+    'final_settlements',
     'room_progression',
     'breaking_cases',
     'breaking_releases', 'breaking_plans',

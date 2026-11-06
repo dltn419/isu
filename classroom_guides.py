@@ -57,7 +57,7 @@ def market_activity(c, rid, day):
     items = [dict(r) for r in c.execute('''SELECT asset,COUNT(*) trade_count,SUM(qty) quantity,
        SUM(qty*price) amount,SUM(CASE WHEN side='buy' THEN qty ELSE 0 END) buy_quantity,
        SUM(CASE WHEN side='sell' THEN qty ELSE 0 END) sell_quantity
-       FROM orders WHERE room_id=? AND status='filled' AND filled_day BETWEEN ? AND ?
+       FROM orders WHERE room_id=? AND status='filled' AND is_final_liquidation=0 AND filled_day BETWEEN ? AND ?
        GROUP BY asset ORDER BY amount DESC,trade_count DESC,asset LIMIT 5''', (rid,start,day))]
     return {'start_day':start,'end_day':day,'source':'우리 반 실제 체결','ranking':'체결금액', 'items':items}
 

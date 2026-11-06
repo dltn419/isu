@@ -72,11 +72,13 @@ def test_full_year_advance_keeps_reports_maturities_and_eight_bond_payments(clas
     assert state['deposits'][0]['status'] == 'matured'
     assert state['deposits'][0]['paid'] == 11000
     cash_before = state['player']['cash']
+    last_price = next(a['price'] for a in state['assets'] if a['id'] == 'GOV')
     assert advance(c, teacher, 24).json()['phase'] == 'finished'
     assert advance(c, teacher, 24).status_code == 409
     final = c.get('/api/state', headers=learner).json()
     assert final['room']['phase'] == 'finished'
-    assert final['player']['cash'] == cash_before + 150
+    assert final['player']['cash'] == cash_before + 150 + last_price - server.trading_fee(last_price)
+    assert final['holdings'] == []
     payments = [x for x in final['ledger'] if x['note'].startswith('채권 이자') ]
     assert sorted(x['day'] for x in payments) == list(range(3,25,3))
     assert sum(x['amount'] for x in payments) == 1200

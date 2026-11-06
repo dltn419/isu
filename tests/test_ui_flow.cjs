@@ -22,7 +22,7 @@ async function build(role) {
     calls.push({url, options});
     let data = url === '/api/state' ? state : url === '/api/progression' ? {...state.progression,day:state.room.day,phase:state.room.phase,generation:state.room.generation||0,server_time:Date.now()/1000} : url === '/api/demo' ? fixture.demo :
       url.startsWith('/api/history/') ? fixture.history :
-      url.startsWith('/api/admin/student/') ? fixture.preview :
+      url.startsWith('/api/admin/student/') ? (role.startsWith('final_')?fixture.final_preview:fixture.preview) :
       {ok:true, status:'offline', message:'isolated test'};
     if(url === '/api/admin/reset') {state.room.day=1;state.room.generation=(state.room.generation||0)+1;data={ok:true,day:1,generation:state.room.generation};}
     if(url === '/api/admin/advance') {
@@ -40,7 +40,7 @@ async function build(role) {
     }
     return {ok:true, json:async () => structuredClone(data)};
   };
-  for(const name of ['core.js','guides.js','research.js']) {
+  for(const name of ['core.js','guides.js','ending.js','research.js']) {
     const script = w.document.createElement('script');
     script.textContent = fs.readFileSync(path.join(root,name), 'utf8');
     w.document.body.appendChild(script);
@@ -67,6 +67,19 @@ async function build(role) {
       assert.ok(!/NaN|undefined/.test(d.querySelector('#page').textContent), role+' '+destination+' invalid output');
       assert.equal(d.querySelectorAll('.side-nav button.active').length,1);
     }
+    await w.detail('MKT');
+    assert.equal(d.querySelector('.company-tabs button.active').textContent,'가격 차트');
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='구성 종목·비중').click();
+    assert.equal(d.querySelectorAll('.etf-holdings tbody tr').length,20);
+    assert.equal(d.querySelectorAll('.etf-sector-weights>div').length,5);
+    assert.ok(d.querySelector('.etf-composition').textContent.includes('합계 100%'));
+    await w.detail('TECH');
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='구성 종목·비중').click();
+    assert.equal(d.querySelectorAll('.etf-holdings tbody tr').length,4);
+    await w.detail('INV2');
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='구성 종목·비중').click();
+    assert.ok(d.querySelector('.etf-composition h2').textContent.includes('기준지수'));
+    assert.ok(d.querySelector('.etf-composition .notice').textContent.includes('−2배'));
     await w.detail('HBEL');
     assert.ok(d.querySelector('.price-explanation'),'current price explanation');
     assert.equal(d.querySelectorAll('.price-factors>div').length,3);
@@ -308,6 +321,30 @@ async function build(role) {
     w.closeDayTransition();await w.refresh();assert.equal(d.querySelector('#day-transition'),null,'same final state does not replay');
     assert.deepEqual(errors,[]);dom.window.close();
     console.log('student progression: shared timer, focused input/modal refresh, D-day, earnings and automatic transition dismissal passed');
+  }
+  for(const role of ['final_student','final_teacher']){
+    const {dom,w,errors}=await build(role),d=w.document;
+    assert.ok(d.querySelector('.finale-hero'));
+    assert.equal(d.querySelectorAll('.finale-investment').length,4);
+    assert.equal(d.querySelectorAll('.finale-empty').length,0);
+    assert.equal(d.querySelectorAll('.finale-award').length,4);
+    assert.equal(d.querySelectorAll('.finale-standings tbody tr').length,2);
+    assert.equal(!!d.querySelector('.finale-my-result'),role==='final_student');
+    assert.ok(!/NaN|undefined/.test(d.querySelector('#page').textContent));
+    d.querySelector('.finale-award summary').click();
+    assert.equal(d.querySelector('.finale-award details').open,true);
+    if(role==='final_student'){
+      w.go('journal');
+      assert.ok(!d.querySelector('#page').textContent.includes('24일차 게임 종료 · 마지막 시세로 자동 정산'),'automatic sales are not student decisions');
+      w.go('market');assert.ok(d.querySelector('.daily-done').textContent.includes('최종 결산 보기'));
+      d.querySelector('.daily-done button').click();assert.ok(d.querySelector('.finale-hero'));
+    }else{
+      await w.loadPreview(fixture.final_student.player.id);w.goTeacher('preview');
+      assert.ok(d.querySelector('.preview-banner'));
+      assert.ok(d.querySelector('.finale-my-result'));
+    }
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log(role+': final cash, four retrospective cards, style criteria and navigation passed');
   }
   const {dom,w,errors}=await build('demo');
   await w.startDemo();

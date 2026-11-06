@@ -92,9 +92,11 @@ def test_final_day_purchase_only_earns_one_day(classroom):
         assert advance(c, teacher, day).status_code == 200
     trade(c, learner)
     before = state(c, learner)['player']['cash']
+    last_price = next(a['price'] for a in state(c, learner)['assets'] if a['id'] == 'GOV')
     assert advance(c, teacher, 24).status_code == 200
     after = state(c, learner)
-    assert after['player']['cash'] == before + 50
+    assert after['player']['cash'] == before + 50 + last_price - server.trading_fee(last_price)
+    assert after['holdings'] == []
     assert after['bond_income']['paid'] == 50
     assert after['bond_policy']['next_payment_day'] is None
 
