@@ -218,7 +218,7 @@ function bondTerms(a,qty=1){
  const p=S.bond_policy||{interval_days:3,year_days:24,next_payment_day:S.room.phase==='finished'?null:Math.ceil(S.room.day/3)*3},finished=S.room.phase==='finished';
  if(p.mode==='legacy_annual')return '<div class="bond-terms"><b>이전 지급방식으로 결산한 게임입니다.</b><p>이 게임의 채권 이자는 기존 연말 지급 내역을 유지합니다. 새 게임부터 3일 간격 지급을 적용해요.</p></div>';
  const coupon=Math.round(a.initial*a.yield*qty*p.interval_days/p.year_days);
- return `<div class="bond-terms"><b>채권 이자 · ${p.interval_days}일마다 지급</b><div><span>연이자율 · 24일 기준</span><strong>${pct(a.yield*100).replace('+','')}</strong></div><div><span>${qty}주를 ${p.interval_days}일 보유하면</span><strong>${money(coupon)}</strong></div><div><span>${finished?'지급 완료':'다음 지급일'}</span><strong>${finished?'24일차 마감':p.next_payment_day+'일차 마감'}</strong></div><p>액면 ${money(a.initial)} 기준 단리예요. 매일 마감 시 보유 수량만큼 쌓이고, 중간 매수·매도는 보유한 날만 계산해요. 팔기 전에 쌓인 이자도 지급일에 받아요. 가격 손익은 별도이며, 원 미만 금액은 모아 반올림해요.</p></div>`;
+ return `<div class="bond-terms"><b>채권 이자 · ${p.interval_days}일마다 지급</b><div><span>연이자율 · 24일 기준</span><strong>${pct(a.yield*100).replace('+','')}</strong></div><div><span>${qty}주를 ${p.interval_days}일 보유하면</span><strong>${money(coupon)}</strong></div><div><span>${finished?'지급 완료':'다음 지급일'}</span><strong>${finished?'24일차 마감':p.next_payment_day+'일차 마감'}</strong></div><p>액면 ${money(a.initial)} 기준 단리예요. 매일 마감 시 보유 수량만큼 쌓이고, 중간 매수·매도는 보유한 날만 계산해요. 팔기 전에 쌓인 이자도 지급일에 받아요. 이미 쌓인 이자는 당시 이율로 유지돼요. 가격 손익은 별도이며, 원 미만 금액은 모아 반올림해요.</p></div>`;
 }
 function bondIncomePanel(){
  const income=S.bond_income||{unpaid:0,paid:0},p=S.bond_policy||{next_payment_day:Math.ceil(S.room.day/3)*3};

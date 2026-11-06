@@ -142,15 +142,21 @@ async function build(role) {
   if(fixture.bond_student){
     const {dom,w,errors}=await build('bond_student'),d=w.document;
     w.go('portfolio');
-    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('83원'));
-    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('125원'));
+    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('100원'));
+    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('150원'));
     assert.ok(d.querySelector('.bond-income-summary').textContent.includes('6일차 마감'));
     await w.detail('GOV');
     const terms=d.querySelector('.bond-terms').textContent;
     assert.ok(terms.includes('3일마다 지급'));
-    assert.ok(terms.includes('1주를 3일 보유하면125원'));
+    assert.ok(terms.includes('1주를 3일 보유하면150원'));
     assert.ok(terms.includes('팔기 전에 쌓인 이자도 지급일에 받아요'));
     assert.ok(!terms.includes('연말 보유 시'));
+    for(const [aid,rate,coupon] of [['GOV','12.0%','150원'],['CORP','14.0%','175원'],['JUNK','16.0%','200원']]){
+      await w.detail(aid);
+      const text=d.querySelector('.bond-terms').textContent;
+      assert.ok(text.includes(rate),aid+' annual rate');
+      assert.ok(text.includes(coupon),aid+' three-day coupon');
+    }
     assert.deepEqual(errors,[],'bond income UI script errors');
     dom.window.close();
     console.log('bond income: accrued, paid, next payout and holding rules passed');

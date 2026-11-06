@@ -15,7 +15,7 @@ def state(c, learner):
     return c.get('/api/state', headers=learner).json()
 
 
-@pytest.mark.parametrize('asset,coupon', [('GOV',125), ('CORP',175), ('JUNK',275)])
+@pytest.mark.parametrize('asset,coupon', [('GOV',150), ('CORP',175), ('JUNK',200)])
 def test_three_day_coupon_and_no_duplicate_or_cost_change(classroom, asset, coupon):
     c, teacher, learner = classroom
     trade(c, learner, asset=asset)
@@ -39,26 +39,26 @@ def test_variable_quantities_and_earned_interest_survives_complete_sale(classroo
     c, teacher, learner = classroom
     trade(c, learner, qty=2)
     assert advance(c, teacher, 1).status_code == 200
-    assert state(c, learner)['bond_income']['unpaid'] == 83
+    assert state(c, learner)['bond_income']['unpaid'] == 100
     trade(c, learner)
     assert advance(c, teacher, 2).status_code == 200
-    assert state(c, learner)['bond_income']['unpaid'] == 208
+    assert state(c, learner)['bond_income']['unpaid'] == 250
     trade(c, learner, 'sell', 2)
     assert advance(c, teacher, 3).status_code == 200
-    assert state(c, learner)['bond_income']['paid'] == 250  # 2+3+1 share-days
+    assert state(c, learner)['bond_income']['paid'] == 300  # 2+3+1 share-days
     assert advance(c, teacher, 4).status_code == 200
     trade(c, learner, 'sell')
     before = state(c, learner)
     assert before['holdings'] == []
-    assert before['bond_income']['unpaid'] == 42
-    assert before['player']['net'] == before['player']['cash'] + 42
+    assert before['bond_income']['unpaid'] == 50
+    assert before['player']['net'] == before['player']['cash'] + 50
     assert advance(c, teacher, 5).status_code == 200
     assert c.post('/api/admin/close', headers=teacher).status_code == 200
     after = state(c, learner)
-    assert after['player']['cash'] == before['player']['cash'] + 42
+    assert after['player']['cash'] == before['player']['cash'] + 50
     assert after['player']['net'] == before['player']['net']
     assert after['bond_income']['unpaid'] == 0
-    assert after['bond_income']['paid'] == 292
+    assert after['bond_income']['paid'] == 350
     preview = c.get('/api/admin/student/'+str(after['player']['id']),headers=teacher).json()
     assert preview['bond_income'] == after['bond_income']
     assert preview['player']['net'] == after['player']['net']
@@ -68,22 +68,22 @@ def test_late_purchase_roundtrip_and_fractional_won_carry(classroom):
     c, teacher, learner = classroom
     assert advance(c, teacher, 1).status_code == 200
     assert advance(c, teacher, 2).status_code == 200
-    trade(c, learner)
+    trade(c, learner, asset='CORP')
     assert advance(c, teacher, 3).status_code == 200
-    assert state(c, learner)['bond_income']['paid'] == 42
-    trade(c, learner, 'sell')
-    trade(c, learner)
-    trade(c, learner, 'sell')  # Day 4 ends at zero, so it earns no interest.
+    assert state(c, learner)['bond_income']['paid'] == 58
+    trade(c, learner, 'sell', asset='CORP')
+    trade(c, learner, asset='CORP')
+    trade(c, learner, 'sell', asset='CORP')  # Day 4 ends at zero, so it earns no interest.
     assert advance(c, teacher, 4).status_code == 200
-    trade(c, learner)
+    trade(c, learner, asset='CORP')
     assert advance(c, teacher, 5).status_code == 200
-    trade(c, learner, 'sell')
+    trade(c, learner, 'sell', asset='CORP')
     assert c.post('/api/admin/close', headers=teacher).status_code == 200
     after = state(c, learner)
-    # Two distinct one-day holdings earn round(1000 * 2/24)=83 total, not 42+42.
-    assert after['bond_income']['paid'] == 83
+    # Two distinct one-day holdings earn round(1400 * 2/24)=117 total, not 58+58.
+    assert after['bond_income']['paid'] == 117
     assert after['bond_income']['unpaid'] == 0
-    assert sorted(x['amount'] for x in after['ledger'] if x['note'].startswith('채권 이자')) == [41,42]
+    assert sorted(x['amount'] for x in after['ledger'] if x['note'].startswith('채권 이자')) == [58,59]
 
 
 def test_final_day_purchase_only_earns_one_day(classroom):
@@ -94,8 +94,8 @@ def test_final_day_purchase_only_earns_one_day(classroom):
     before = state(c, learner)['player']['cash']
     assert advance(c, teacher, 24).status_code == 200
     after = state(c, learner)
-    assert after['player']['cash'] == before + 42
-    assert after['bond_income']['paid'] == 42
+    assert after['player']['cash'] == before + 50
+    assert after['bond_income']['paid'] == 50
     assert after['bond_policy']['next_payment_day'] is None
 
 
@@ -113,7 +113,30 @@ def test_failed_day_advance_rolls_back_interest_and_payout(classroom, monkeypatc
             advance(c, teacher, 3)
     assert state(c, learner) == before
     assert advance(c, teacher, 3).status_code == 200
-    assert state(c, learner)['bond_income']['paid'] == 125
+    assert state(c, learner)['bond_income']['paid'] == 150
+
+
+def test_rate_change_preserves_earned_interest_and_past_cash(classroom, monkeypatch):
+    c, teacher, learner = classroom
+    # A running v12 game already earned three days at the original 10% rate.
+    with monkeypatch.context() as patch:
+        patch.setitem(server.AMAP['GOV'], 'yield', .10)
+        trade(c, learner)
+        for day in (1,2,3):
+            assert advance(c, teacher, day).status_code == 200
+    before = state(c, learner)
+    assert before['bond_income']['paid'] == 125
+    with server.conn() as db:
+        old_units = [dict(r) for r in db.execute('SELECT * FROM bond_accruals WHERE day<=3')]
+    server.init()
+    assert state(c, learner)['player']['cash'] == before['player']['cash']
+    for day in (4,5,6):
+        assert advance(c, teacher, day).status_code == 200
+    after = state(c, learner)
+    assert after['bond_income']['paid'] == 125 + 150
+    assert after['bond_income']['unpaid'] == 0
+    with server.conn() as db:
+        assert [dict(r) for r in db.execute('SELECT * FROM bond_accruals WHERE day<=3')] == old_units
 
 
 def test_legacy_migration_reconstructs_closed_holdings_once_and_preserves_game(classroom):
@@ -127,15 +150,15 @@ def test_legacy_migration_reconstructs_closed_holdings_once_and_preserves_game(c
     trade(c, learner, qty=2)
     assert advance(c, teacher, 4).status_code == 200
     before = state(c, learner)
-    assert before['bond_income']['paid'] == 125
-    assert before['bond_income']['unpaid'] == 83
+    assert before['bond_income']['paid'] == 150
+    assert before['bond_income']['unpaid'] == 100
     # Represent an unchanged v11 game: trades exist but periodic income did not.
     with server.conn() as db:
         db.execute('DELETE FROM bond_accruals')
         db.execute('DELETE FROM bond_payments')
         db.execute("DELETE FROM ledgers WHERE note LIKE '채권 이자%'")
-        db.execute('UPDATE players SET cash=cash-125')
-        db.execute('UPDATE daily_values SET net=net-208,cash=cash-125 WHERE day=5')
+        db.execute('UPDATE players SET cash=cash-150')
+        db.execute('UPDATE daily_values SET net=net-250,cash=cash-150 WHERE day=5')
         db.execute('UPDATE rooms SET bond_interest_version=1')
     server.init()
     migrated = state(c, learner)
@@ -172,7 +195,7 @@ def test_reset_archives_and_clears_interest_without_touching_other_rooms(classro
     for day in range(1,5):
         assert advance(c, teacher, day).status_code == 200
     before = state(c, learner)
-    assert before['bond_income']['paid'] == 125 and before['bond_income']['unpaid'] == 42
+    assert before['bond_income']['paid'] == 150 and before['bond_income']['unpaid'] == 50
     other = c.post('/api/rooms',json={'name':'다른 교실','password':'other123'}).json()
     other_teacher = {'Authorization':'Bearer '+other['token']}
     untouched = c.get('/api/state',headers=other_teacher).json()

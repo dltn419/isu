@@ -31,9 +31,9 @@ ASSETS += [
  {'id':'LEV2','name':'전체시장 2배 ETF','sector':'전체','type':'etf','risk':'high','initial':5000},
  {'id':'INV2','name':'전체시장 -2배 ETF','sector':'전체','type':'etf','risk':'high','initial':5000},
  {'id':'GOLD','name':'금 1g','sector':'원자재','type':'gold','risk':'medium','initial':6500},
- {'id':'GOV','name':'든든 국채','sector':'채권','type':'bond','risk':'low','initial':10000,'yield':0.10},
+ {'id':'GOV','name':'든든 국채','sector':'채권','type':'bond','risk':'low','initial':10000,'yield':0.12},
  {'id':'CORP','name':'튼튼 기업채','sector':'채권','type':'bond','risk':'medium','initial':10000,'yield':0.14},
- {'id':'JUNK','name':'도전 고수익채','sector':'채권','type':'bond','risk':'high','initial':10000,'yield':0.22},
+ {'id':'JUNK','name':'도전 고수익채','sector':'채권','type':'bond','risk':'high','initial':10000,'yield':0.16},
 ]
 
 COMPANY_DESCRIPTIONS = {
@@ -72,6 +72,8 @@ AMAP={a['id']:a for a in ASSETS}
 # A common teaching rate for traded assets; deposits and taxes are excluded.
 FEE_POLICY={'rate':0.00015,'percent':0.015,'minimum':1,'rounding':'half_up','numerator':15,'denominator':100000}
 def trading_fee(gross):return max(1,(gross*15+50000)//100000)
+BOND_PRICE_PARAMETERS={'GOV':{'volatility':.65,'limit':5},'CORP':{'volatility':1.3,'limit':8},'JUNK':{'volatility':2,'limit':12}}
+
 def paid_fees(c,pid):
  return -one(c,"SELECT COALESCE(SUM(amount),0) n FROM ledgers WHERE player_id=? AND kind='fee'",(pid,))['n']
 
@@ -200,7 +202,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'12.0-periodic-bonds'}
+ return {'ok': True,'version':'13.0-balanced-bonds'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -514,8 +516,8 @@ def generate_prices(c,rid,day,seed,earnings=None):
   elif a['type']=='gold':
    ret=max(-10,min(10,rng.gauss(0,1.7)-market*.25))
   elif a['type']=='bond':
-   vol={'GOV':.65,'CORP':1.3,'JUNK':4}[id]
-   cap={'GOV':5,'CORP':8,'JUNK':40}[id]
+   vol=BOND_PRICE_PARAMETERS[id]['volatility']
+   cap=BOND_PRICE_PARAMETERS[id]['limit']
    ret=max(-cap,min(cap,rng.gauss(0,vol)-market*.15))
   else: continue
   price=max(1,round(old*(1+ret/100)))
@@ -667,7 +669,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'12.0-periodic-bonds'}
+def health():return {'ok':True,'db':str(DB.name),'version':'13.0-balanced-bonds'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
