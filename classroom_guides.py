@@ -17,9 +17,10 @@ def summarize(article, names):
         if status == 'delayed':
             return f'{name}의 확인 일정이 {article.get("expected_start")}일차로 늦어졌어요. 매출 반영 시점과 준비 비용을 다시 살펴보세요.'
         result = '확인된 영업 효과' if status in ('confirmed','operating') else '회사가 제시한 전망'
+        topic = '는' if status in ('confirmed','operating') else '은'
         period = f'{article["expected_start"]}~{article.get("expected_end") or article["expected_start"]}일차' if article.get('expected_start') else '후속 발표'
         expectation=next((s.strip() for s in article['body'].split('. ') if '새로 확인된 수치와 일정은' in s or '새로 확인된 내용은 기존 기대와' in s),'')
-        return (f'{name}: {result}은 완전 가동 시 매출 {m["revenue_pct"]:+.1f}%, '
+        return (f'{name}: {result}{topic} 완전 가동 시 매출 {m["revenue_pct"]:+.1f}%, '
                 f'이익률 {m["margin_pp"]:+.2f}%p예요. {period}의 실제 운영과 분기 실적을 함께 확인해요.'
                 + (' '+expectation.rstrip('.')+'.' if expectation else ''))
     if article.get('is_signal'):
