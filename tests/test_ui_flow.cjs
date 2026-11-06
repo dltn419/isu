@@ -20,7 +20,7 @@ async function build(role) {
   if(role !== 'demo') w.localStorage.setItem('haru_token', 'unit-test');
   w.fetch = async (url, options={}) => {
     calls.push({url, options});
-    let data = url === '/api/state' ? state : url === '/api/demo' ? fixture.demo :
+    let data = url === '/api/state' ? state : url === '/api/progression' ? {...state.progression,day:state.room.day,phase:state.room.phase,generation:state.room.generation||0,server_time:Date.now()/1000} : url === '/api/demo' ? fixture.demo :
       url.startsWith('/api/history/') ? fixture.history :
       url.startsWith('/api/admin/student/') ? fixture.preview :
       {ok:true, status:'offline', message:'isolated test'};
@@ -28,6 +28,15 @@ async function build(role) {
     if(url === '/api/admin/advance') {
       state.room.day++;
       data = {ok:true, day:state.room.day, phase:'trading'};
+    }
+    if(url === '/api/admin/progression'){
+      const change=JSON.parse(options.body);
+      state.progression={auto_ready:0,timer_enabled:0,timer_seconds:180,revision:0,...state.progression};
+      if(change.auto_ready!==undefined)state.progression.auto_ready=Number(change.auto_ready);
+      if(change.timer_action==='start'){state.progression.timer_enabled=1;state.progression.timer_seconds=change.minutes*60;state.progression.deadline=Date.now()/1000+change.minutes*60;}
+      if(change.timer_action==='stop'){state.progression.timer_enabled=0;state.progression.deadline=null;}
+      state.progression.revision++;state.progression.server_time=Date.now()/1000;
+      data={ok:true,progression:state.progression};
     }
     return {ok:true, json:async () => structuredClone(data)};
   };
@@ -37,7 +46,7 @@ async function build(role) {
     w.document.body.appendChild(script);
   }
   await tick();
-  return {dom,w,errors,calls};
+  return {dom,w,errors,calls,state};
 }
 
 (async () => {
@@ -247,6 +256,52 @@ async function build(role) {
     assert.ok(d.querySelector('[role="dialog"]').textContent.includes('반대로'));
     assert.deepEqual(errors,[]);dom.window.close();
     console.log('clue news: unconfirmed evidence without a guaranteed breaking alert passed');
+  }
+  {
+    const {dom,w,errors,calls}=await build('teacher'),d=w.document;
+    w.go('admin');assert.ok(d.querySelector('.progression-controls'));
+    assert.equal(d.querySelector('#auto-ready').checked,false);
+    await w.setAutoReady(true);assert.equal(d.querySelector('#auto-ready').checked,true);
+    assert.equal(d.querySelector('#auto-ready').disabled,false);
+    d.querySelector('#timer-minutes').value='0';await w.startClassTimer();
+    assert.equal(calls.filter(c=>c.url==='/api/admin/progression').length,1);
+    d.querySelector('#timer-minutes').value='2';await w.startClassTimer();
+    assert.equal(d.querySelector('#timer-start').disabled,false);
+    assert.ok(d.querySelector('.classroom-timer'));
+    assert.ok(/^02:00|01:59$/.test(d.querySelector('#classroom-countdown').textContent));
+    const call=calls.find(c=>c.url==='/api/admin/progression'&&JSON.parse(c.options.body).timer_action==='start');
+    assert.equal(JSON.parse(call.options.body).minutes,2);
+    assert.equal(call.options.headers['X-Haru-Expected-Day'],String(fixture.teacher.room.day));
+    await w.stopClassTimer();assert.equal(d.querySelector('.classroom-timer'),null);
+    w.go('home');assert.ok(d.querySelector('.mood-help').textContent.includes('68%'));
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('teacher progression: toggles, minute validation, start/stop, expected day and mood help passed');
+  }
+  {
+    const {dom,w,errors,state}=await build('student'),d=w.document;
+    state.progression={auto_ready:0,timer_enabled:1,timer_seconds:120,deadline:Date.now()/1000+120,revision:100,server_time:Date.now()/1000};
+    await w.refresh();
+    for(const page of ['home','market','portfolio','journal','bank']){w.go(page);assert.ok(d.querySelector('.classroom-timer'),page+' timer')}
+    await w.detail('HBEL');
+    d.querySelector('#reason').focus();
+    state.room.day=7;await w.pollProgression();
+    assert.equal(d.querySelector('#day-transition h2').textContent,'2분기 · 7일차');
+    assert.ok(d.querySelector('#day-transition p').textContent.includes('D-5'));
+    assert.equal(d.querySelector('#app').inert,true);
+    w.closeDayTransition();assert.equal(d.querySelector('#app').inert,false);
+    await w.openArticle(fixture.student.news[0].id);
+    state.room.day=8;await w.pollProgression();
+    assert.equal(d.querySelector('[role="dialog"]'),null,'date change closes the old article modal');
+    assert.ok(d.querySelector('#day-transition p').textContent.includes('D-4'));
+    await new Promise(resolve=>setTimeout(resolve,2050));
+    assert.equal(d.querySelector('#day-transition'),null,'transition dismisses automatically');
+    state.room.day=12;await w.pollProgression();
+    assert.ok(d.querySelector('#day-transition p').textContent.includes('실적 발표 · 오늘 공개'));
+    w.closeDayTransition();state.room.day=24;state.room.phase='finished';await w.pollProgression();
+    assert.ok(d.querySelector('#day-transition h2').textContent.includes('최종 결산'));
+    w.closeDayTransition();await w.refresh();assert.equal(d.querySelector('#day-transition'),null,'same final state does not replay');
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('student progression: shared timer, focused input/modal refresh, D-day, earnings and automatic transition dismissal passed');
   }
   const {dom,w,errors}=await build('demo');
   await w.startDemo();

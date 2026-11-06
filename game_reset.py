@@ -8,6 +8,7 @@ import breaking_news
 
 
 ROOM_TABLES = (
+    'room_progression',
     'breaking_cases',
     'breaking_releases', 'breaking_plans',
     'bond_accruals', 'bond_payments',
@@ -57,6 +58,7 @@ def reset_room(c, room, assets, timestamp):
         c.execute(f'DELETE FROM {table} WHERE player_id IN (SELECT id FROM players WHERE room_id=?)', (rid,))
     for table in ROOM_TABLES:
         c.execute(f'DELETE FROM {table} WHERE room_id=?', (rid,))
+    c.execute('INSERT INTO room_progression(room_id) VALUES(?)',(rid,))
     seed = secrets.randbelow(1000000000)
     if seed == room['seed']:
         seed = (seed + 1) % 1000000000
