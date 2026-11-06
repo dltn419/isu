@@ -322,6 +322,50 @@ async function build(role) {
     assert.deepEqual(errors,[]);dom.window.close();
     console.log('student progression: shared timer, focused input/modal refresh, D-day, earnings and automatic transition dismissal passed');
   }
+  {
+    const {dom,w,errors,state}=await build('student'),d=w.document;
+    const article=(id,title,sector,kind='company',related_assets=[])=>({id,title,body:'기업의 사업과 앞으로의 결과를 살펴보세요.',day:6,sector,kind,related_assets,certainty:'확인된 사실',source:'테스트 경제',horizon:'short'});
+    state.news=[
+      article(900001,'시장 공통 소식','전체','macro'),
+      article(900002,'기술 업종 전망','기술','sector'),
+      article(900003,'한빛전자 실적 확인','HBEL','earnings',['HBEL']),
+      article(900004,'넥스디바이스 취재 단서','NXDV','company',['NXDV','NXDV']),
+      article(900005,'식품 업종 기업 소식','DDFF','company',['DDFF']),
+      {...article(900006,'아직 공개되지 않은 기사','HBEL'),day:7},
+      article(900003,'한빛전자 실적 확인','HBEL','earnings',['HBEL']),
+      {...article(900007,'먼저 나온 부품 사업','HBCP'),day:1},
+    ];
+    await w.refresh();await w.detail('TECH');
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='관련 뉴스').click();
+    assert.ok(d.querySelector('.company-research').textContent.includes('한빛전자 실적 확인'));
+    assert.ok(d.querySelector('.company-research').textContent.includes('기술 업종 전망'));
+    assert.ok(d.querySelector('.company-research').textContent.includes('시장 공통 소식'));
+    assert.ok(!d.querySelector('.company-research').textContent.includes('식품 업종 기업 소식'));
+    assert.ok(!d.querySelector('.company-research').textContent.includes('아직 공개되지 않은 기사'));
+    assert.equal(d.querySelectorAll('.company-research .article-card').length,5,'deduplicate and respect published day');
+    assert.ok(d.querySelector('.company-research').textContent.includes('한빛전자 · ETF 구성 35%'));
+    assert.ok(d.querySelector('.company-research').textContent.includes('기술 업종 · ETF 구성 100%'));
+    await w.openArticle(900003);
+    assert.ok(d.querySelector('[role="dialog"] .etf-news-context').textContent.includes('35%'));
+    [...d.querySelectorAll('[role="dialog"] button')].find(b=>b.textContent.includes('기술 ETF로 생각 남기기')).click();
+    assert.equal(d.querySelector('#note-asset').value,'TECH','keep ETF as the investment being considered');
+    assert.equal(d.querySelector('#note-evidence input[value="900003"]').checked,true);
+    await w.detail('INV2');
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='관련 뉴스').click();
+    assert.ok(d.querySelector('.etf-news-intro').textContent.includes('반대 방향'));
+    assert.ok(d.querySelector('.company-research').textContent.includes('한빛전자 · 기준지수 구성 7%'));
+    assert.ok(d.querySelector('.company-research').textContent.includes('식품 업종 기업 소식'));
+    w.showAssetNews('TECH');
+    assert.equal(d.querySelectorAll('.news-grid .article-card').length,5);
+    assert.ok(!d.querySelector('.news-grid').textContent.includes('식품 업종 기업 소식'));
+    assert.ok(d.querySelector('.news-grid .etf-news-context'));
+    state.watchlist=[];state.holdings=[{asset:'TECH',qty:3,cost:15000}];
+    await w.refresh();w.eval("newsFocus='';newsMode='mine';newsScope='all';render()");
+    assert.ok(d.querySelector('.news-grid').textContent.includes('한빛전자 실적 확인'));
+    assert.ok(!d.querySelector('.news-grid').textContent.includes('식품 업종 기업 소식'));
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('ETF news: constituent/sector/market links, earnings, inverse guidance, evidence, focus and holdings passed');
+  }
   for(const role of ['final_student','final_teacher']){
     const {dom,w,errors}=await build(role),d=w.document;
     assert.ok(d.querySelector('.finale-hero'));

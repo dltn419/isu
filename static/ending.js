@@ -9,6 +9,50 @@ function etfCompositionPanel(a){
  <div class="tablewrap etf-holdings"><table><thead><tr><th>구성 기업</th><th>업종</th><th>${leveraged?'기준지수 내 비중':'ETF 안의 비중'}</th></tr></thead><tbody>${c.holdings.map(h=>`<tr><td><button class="text-btn" onclick="detail('${h.asset}')">${esc(h.name)} ${icon('chevron')}</button></td><td>${esc(h.sector)}</td><td><b>${weight(h.weight)}</b></td></tr>`).join('')}</tbody></table></div><p class="hint">분산왕을 정할 때도 이 구성으로 펼쳐서 계산해요. 같은 기업이 여러 ETF에 들어 있으면 그 비중을 합쳐요.</p></div>`;
 }
 
+function newsAssetRelation(n,a){
+ if(!a||n.day>S.room.day||n.active===0)return null;
+ const ids=new Set([n.sector,...(n.related_assets||[])]);
+ if(ids.has(a.id))return {kind:'direct',priority:4,label:'이 상품에 직접 연결된 소식'};
+ if(a.type!=='etf')return null;
+ if(n.sector==='전체')return {kind:'market',priority:1,label:'시장 전체에 관한 소식'};
+ const composition=a.etf_composition;if(!composition)return null;
+ const basis=composition.multiplier===1?'ETF':'기준지수';
+ const percent=w=>(w*100).toFixed(1).replace(/\.0$/,'')+'%';
+ const sector=composition.sectors.find(s=>s.sector===n.sector);
+ if(sector)return {kind:'sector',priority:2,label:`${sector.sector} 업종 · ${basis} 구성 ${percent(sector.weight)}`};
+ const primary=composition.holdings.find(h=>h.asset===n.sector);
+ const companies=primary?[primary]:composition.holdings.filter(h=>ids.has(h.asset));
+ if(!companies.length)return null;
+ const weight=companies.reduce((sum,h)=>sum+h.weight,0),name=companies[0].name+(companies.length>1?` 외 ${companies.length-1}개 기업`:'');
+ return {kind:'company',priority:3,label:`${name} · ${basis} 구성 ${percent(weight)}`};
+}
+function newsMatchesAsset(n,a){return !!newsAssetRelation(n,a)}
+function relatedAssetNews(a,limit=12){
+ const seen=new Set();
+ const list=(S.news||[]).filter(n=>{if(seen.has(n.id)||!newsMatchesAsset(n,a)||(a.type!=='etf'&&n.kind==='earnings'))return false;seen.add(n.id);return true});
+ list.sort((x,y)=>y.day-x.day||Number(!!y.is_breaking)-Number(!!x.is_breaking)||Number(y.kind==='earnings')-Number(x.kind==='earnings')||newsAssetRelation(y,a).priority-newsAssetRelation(x,a).priority||y.id-x.id);
+ return limit===null?list:list.slice(0,limit);
+}
+function etfNewsBadge(n,a){
+ const relation=a?.type==='etf'?newsAssetRelation(n,a):null;
+ return relation?`<div class="etf-news-context">${icon('link')}<span>${esc(relation.label)}</span></div>`:'';
+}
+function etfNewsIntro(a){
+ const multiplier=a.etf_composition?.multiplier||1;
+ return `<p class="notice etf-news-intro">${esc(a.name)}에 담긴 기업과 업종, 시장 전체의 소식을 모았어요. 기업 비중과 다른 기업의 움직임이 함께 작용해요.${multiplier<0?'<br><b>인버스는 기준지수와 반대 방향을 목표로 해요.</b> 구성 기업의 호재가 이 ETF에는 하락 요인이 될 수 있어요.':multiplier>1?'<br>2배 상품은 하루 지수 수익률의 약 2배를 목표로 해요. 여러 날의 누적 수익률은 단순한 2배와 달라질 수 있어요.':''}</p>`;
+}
+function etfRelatedNewsPanel(a){
+ const all=relatedAssetNews(a,null),recent=all.slice(0,12);
+ return `<div class="section-title"><div><h2>이 ETF의 관련 뉴스</h2><p class="sub no-margin">최근 ${recent.length}건 · 구성 기업·업종·시장 소식</p></div><button class="text-btn" onclick="showAssetNews('${a.id}')">관련 뉴스 ${all.length}건 모아보기 ${icon('arrow')}</button></div>${etfNewsIntro(a)}${newsCards(recent,true,a)}`;
+}
+function showAssetNews(aid){
+ newsFocus=aid;newsScope='all';newsSector='전체';newsHorizon='all';newsMode='all';newsLayout='all';newsAdvanced=false;go('news');
+}
+function currentEtfNewsContext(n){
+ const a=currentView()==='detail'?asset(selected):currentView()==='news'?asset(newsFocus):null;
+ return a?.type==='etf'&&newsMatchesAsset(n,a)?a:null;
+}
+
 function finaleInvestmentCard(card,gain,index){
  const label=gain?'수익을 남긴 투자':'돌아볼 투자';
  if(!card)return `<article class="finale-investment finale-empty"><span class="finale-kicker">${label} ${index+1}</span><p>${gain?'수익':'손실'}이 확정된 다른 투자 기록이 없어요.</p></article>`;
