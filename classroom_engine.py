@@ -102,13 +102,19 @@ def initialize_schema(c):
       room_id INTEGER NOT NULL,asset TEXT NOT NULL,day INTEGER NOT NULL,
       revenue REAL NOT NULL,margin REAL NOT NULL,profit REAL NOT NULL,
       PRIMARY KEY(room_id,asset,day));
+    CREATE TABLE IF NOT EXISTS breaking_plans(
+      room_id INTEGER PRIMARY KEY,seed INTEGER NOT NULL,dates TEXT NOT NULL,not_before INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS breaking_releases(
+      room_id INTEGER NOT NULL,slot INTEGER NOT NULL,day INTEGER NOT NULL,news_id INTEGER NOT NULL,
+      asset TEXT NOT NULL,shock REAL NOT NULL,PRIMARY KEY(room_id,slot),UNIQUE(room_id,day));
     ''')
     columns = {x[1] for x in c.execute('PRAGMA table_info(news)')}
     for col, ddl in {
         'kind': "TEXT NOT NULL DEFAULT 'manual'", 'source': "TEXT NOT NULL DEFAULT '교사 편집국'",
         'certainty': "TEXT NOT NULL DEFAULT '보도'", 'event_id': 'INTEGER',
         'related_assets': "TEXT NOT NULL DEFAULT '[]'", 'lens': "TEXT NOT NULL DEFAULT ''",
-        'horizon': "TEXT NOT NULL DEFAULT 'short'", 'expected_start': 'INTEGER', 'expected_end': 'INTEGER'
+        'horizon': "TEXT NOT NULL DEFAULT 'short'", 'expected_start': 'INTEGER', 'expected_end': 'INTEGER',
+        'is_breaking': 'INTEGER NOT NULL DEFAULT 0'
     }.items():
         if col not in columns:
             c.execute(f'ALTER TABLE news ADD COLUMN {col} {ddl}')

@@ -10,6 +10,7 @@ import classroom_engine as engine
 import classroom_guides as guides
 import game_reset
 import bond_income
+import breaking_news
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -130,6 +131,8 @@ def init():
   c.execute('BEGIN IMMEDIATE')
   for room in c.execute('SELECT * FROM rooms WHERE bond_interest_version=1').fetchall():
    bond_income.migrate_room(c,room,ASSETS)
+  for room in c.execute("SELECT * FROM rooms WHERE phase!='finished'").fetchall():
+   breaking_news.ensure_plan(c,room['id'],room['seed'],not_before=room['day']+1)
   # Preserve game progress; only earned bond interest is added by the one-time migration.
 init()
 
@@ -202,7 +205,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'13.0-balanced-bonds'}
+ return {'ok': True,'version':'14.0-breaking-news'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -232,6 +235,7 @@ def create_room(b:CreateRoom):
   c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
   c.execute('INSERT INTO sessions(token_hash,room_id,player_id,role,created) VALUES(?,?,NULL,?,?)',(digest(secret),rid,'admin',now()))
   publish_dynamic_news(c,rid,1,one(c,'SELECT seed FROM rooms WHERE id=?',(rid,))['seed'],'neutral')
+  breaking_news.ensure_plan(c,rid,one(c,'SELECT seed FROM rooms WHERE id=?',(rid,))['seed'])
   log(c,rid,1,'create','교사가 게임방 생성')
  return {'token':secret,'code':code,'role':'admin'}
 @app.post('/api/admin/login')
@@ -271,7 +275,7 @@ def state(authorization:str|None=Header(None)):
   prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   price_map={x['asset']:x for x in prices}
   out={'room':r,'role':s['role'],'assets':[{**a,**price_map.get(a['id'],{})} for a in ASSETS],
-       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
+       'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
   out['fee_policy']=FEE_POLICY
   out['bond_policy']=bond_income.policy(r)
@@ -493,7 +497,7 @@ def close_market(authorization:str|None=Header(None),x_haru_game_generation:int|
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
   return close_trading_day(c,r)
 
-def generate_prices(c,rid,day,seed,earnings=None):
+def generate_prices(c,rid,day,seed,earnings=None,breaking=None):
  rng=random.Random(seed+day*10007)
  previous={p['asset']:p['price'] for p in rows(c,'SELECT asset,price FROM prices WHERE room_id=? AND day=?',(rid,day-1))}
  effects=rows(c,'SELECT sector,impact,title FROM news WHERE room_id=? AND day=? AND active=1',(rid,day-1))
@@ -513,6 +517,7 @@ def generate_prices(c,rid,day,seed,earnings=None):
    ret=carry+beta*(market+regime)+sectors[a['sector']]*.5+news+(earnings or {}).get(id,0)+rng.gauss(0,vol)
    cap={'stable':7,'growth':12,'high':20}[risk]
    ret=max(-cap,min(cap,ret))
+   if id in (breaking or {}):ret=max(-35,min(35,breaking[id]))
   elif a['type']=='gold':
    ret=max(-10,min(10,rng.gauss(0,1.7)-market*.25))
   elif a['type']=='bond':
@@ -553,8 +558,9 @@ def start_trading_day(c,r):
  day=r['day']+1
  engine.evolve_businesses(c,rid,day,r['seed'],ASSETS)
  engine.resolve_events(c,rid,day,r['seed'],ASSETS)
+ breaking=breaking_news.publish_open(c,rid,day,r['seed'],r['mood'],ASSETS)
  earnings=engine.release_earnings(c,rid,day,r['seed'],ASSETS)
- generate_prices(c,rid,day,r['seed'],earnings)
+ generate_prices(c,rid,day,r['seed'],earnings,breaking)
  c.execute("UPDATE rooms SET day=?,phase='trading' WHERE id=?",(day,rid))
  for d in rows(c,"SELECT * FROM deposits WHERE room_id=? AND status='active' AND start_day+term-1<=?",(rid,day)):
   paid=d['principal']+round(d['principal']*d['rate'])
@@ -669,7 +675,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'13.0-balanced-bonds'}
+def health():return {'ok':True,'db':str(DB.name),'version':'14.0-breaking-news'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -805,15 +811,17 @@ def demo_state():
   seed=62171;rid=1
   c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
   engine.publish_news(c,rid,1,seed,'neutral',ASSETS)
+  breaking_news.ensure_plan(c,rid,seed)
   for day in range(2,7):
    engine.evolve_businesses(c,rid,day,seed,ASSETS)
    engine.resolve_events(c,rid,day,seed,ASSETS)
+   breaking=breaking_news.publish_open(c,rid,day,seed,'neutral',ASSETS)
    reactions=engine.release_earnings(c,rid,day,seed,ASSETS)
-   generate_prices(c,rid,day,seed,reactions)
+   generate_prices(c,rid,day,seed,reactions,breaking)
    engine.publish_news(c,rid,day,seed,'neutral',ASSETS)
   price_map={x['asset']:x for x in rows(c,'SELECT asset,price,change FROM prices WHERE day=6')}
   assets=[{**a,**price_map[a['id']]} for a in ASSETS]
-  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics FROM news ORDER BY day DESC,id DESC')
+  news=rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics,is_breaking FROM news ORDER BY day DESC,id DESC')
   for n in news:
    n['related_assets']=json.loads(n['related_assets'])
    n['metrics']=json.loads(n['metrics'])

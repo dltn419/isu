@@ -251,3 +251,15 @@ body { font-size:15px; line-height:1.65; }
 
 .bond-income-summary { margin-bottom:14px; }
 .bond-income-summary p { margin-top:7px; }
+
+/* Rare, already-published news is visible without interrupting the lesson. */
+.breaking-banner { display:flex; align-items:center; gap:14px; padding:16px 18px; margin:0 0 20px; border:1px solid #efc4bc; border-left:4px solid #bb483a; border-radius:10px; background:#fff3ef; color:#70352d; }
+.breaking-label { flex:none; padding:5px 9px; border-radius:5px; background:#b73c30; color:#fff; font-size:12px; font-weight:800; letter-spacing:.08em; }
+.breaking-banner>div { flex:1; min-width:0; }
+.breaking-title { appearance:none; background:none; border:0; padding:0; text-align:left; color:#713329; font:inherit; font-size:15px; line-height:1.6; font-weight:700; cursor:pointer; }
+.breaking-title:hover { text-decoration:underline; }
+.breaking-banner p { margin:4px 0 0; font-size:12px; line-height:1.6; }
+.breaking-banner>.text-btn { flex:none; color:#8b3b30; }
+.certainty.breaking { background:#fbe2dc; color:#9b3427; border-color:#edb9ad; }
+.breaking-article { border-color:#e8b2a7; box-shadow:inset 0 3px #c35d4b; }
+@media(max-width:600px) { .breaking-banner { gap:10px; padding:13px; flex-wrap:wrap; } .breaking-banner>div { flex-basis:calc(100% - 65px); } .breaking-banner>.text-btn { margin-left:auto; } }

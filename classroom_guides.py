@@ -30,7 +30,7 @@ def digest(data, limit=5):
     day = data['room']['day']
     candidates = [n for n in data['news'] if n['day']==day and n['kind']!='briefing']
     def priority(n):
-        return (50 if n['kind']=='earnings' else 35 if n['certainty']=='사실 확인' else
+        return (100 if n.get('is_breaking') else 50 if n['kind']=='earnings' else 35 if n['certainty']=='사실 확인' else
                 25 if n['certainty']=='일정 조정' else 20 if n['kind']=='company' else 5, n['id'])
     chosen, seen, companies = [], set(), set()
     for n in sorted(candidates,key=priority,reverse=True):

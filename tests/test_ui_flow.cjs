@@ -161,6 +161,23 @@ async function build(role) {
     dom.window.close();
     console.log('bond income: accrued, paid, next payout and holding rules passed');
   }
+  if(fixture.breaking_student){
+    const {dom,w,errors}=await build('breaking_student'),d=w.document;
+    const article=fixture.breaking_student.news.find(n=>n.is_breaking&&n.day===fixture.breaking_student.room.day);
+    assert.ok(article,'a current-day breaking fixture');
+    assert.equal(d.querySelectorAll('.breaking-banner').length,1);
+    assert.ok(d.querySelector('.breaking-banner').textContent.includes(article.title));
+    assert.ok(d.querySelector('.breaking-banner').textContent.includes('현재 가격에 반영'));
+    d.querySelector('.breaking-title').click();await tick();
+    assert.ok(d.querySelector('[role="dialog"] .certainty.breaking'));
+    w.closeModal();w.go('news');
+    assert.ok(d.querySelector('.breaking-article .certainty.breaking'));
+    w.eval('S.room.day++;render()');
+    assert.equal(d.querySelector('.breaking-banner'),null,'yesterday news does not repeat the alert');
+    assert.deepEqual(errors,[],'breaking news UI script errors');
+    dom.window.close();
+    console.log('breaking news: banner, article, archive and next-day dismissal passed');
+  }
   const {dom,w,errors}=await build('demo');
   await w.startDemo();
   assert.equal(w.document.querySelectorAll('.side-nav button').length,4);

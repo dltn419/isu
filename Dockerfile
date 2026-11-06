@@ -2,7 +2,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py classroom_engine.py market_expectations.py classroom_guides.py game_reset.py bond_income.py ./
+COPY server.py classroom_engine.py market_expectations.py classroom_guides.py game_reset.py bond_income.py breaking_news.py ./
 COPY static ./static
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000

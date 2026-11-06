@@ -11,6 +11,7 @@ from statistics import mean, pstdev
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server
 import classroom_engine as engine
+import breaking_news
 
 
 def percentile(values, p):
@@ -34,8 +35,9 @@ def simulate(seed, mood='neutral'):
     for day in range(2, 25):
         engine.evolve_businesses(c, 1, day, seed, server.ASSETS)
         engine.resolve_events(c, 1, day, seed, server.ASSETS)
+        breaking = breaking_news.publish_open(c,1,day,seed,mood,server.ASSETS)
         reactions = engine.release_earnings(c, 1, day, seed, server.ASSETS)
-        server.generate_prices(c, 1, day, seed, reactions)
+        server.generate_prices(c, 1, day, seed, reactions,breaking)
         engine.publish_news(c, 1, day, seed, mood, server.ASSETS)
     result = {}
     for a in server.ASSETS:
