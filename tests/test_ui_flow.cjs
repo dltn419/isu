@@ -139,6 +139,22 @@ async function build(role) {
     console.log(role+': menus, analysis tabs, record links, fee display and access passed');
     dom.window.close();
   }
+  if(fixture.bond_student){
+    const {dom,w,errors}=await build('bond_student'),d=w.document;
+    w.go('portfolio');
+    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('83원'));
+    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('125원'));
+    assert.ok(d.querySelector('.bond-income-summary').textContent.includes('6일차 마감'));
+    await w.detail('GOV');
+    const terms=d.querySelector('.bond-terms').textContent;
+    assert.ok(terms.includes('3일마다 지급'));
+    assert.ok(terms.includes('1주를 3일 보유하면125원'));
+    assert.ok(terms.includes('팔기 전에 쌓인 이자도 지급일에 받아요'));
+    assert.ok(!terms.includes('연말 보유 시'));
+    assert.deepEqual(errors,[],'bond income UI script errors');
+    dom.window.close();
+    console.log('bond income: accrued, paid, next payout and holding rules passed');
+  }
   const {dom,w,errors}=await build('demo');
   await w.startDemo();
   assert.equal(w.document.querySelectorAll('.side-nav button').length,4);

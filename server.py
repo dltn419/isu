@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 import classroom_engine as engine
 import classroom_guides as guides
 import game_reset
+import bond_income
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -114,6 +115,7 @@ def init():
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
   engine.initialize_schema(c)
   game_reset.initialize(c)
+  bond_income.initialize(c)
   if 'fee' not in {row[1] for row in c.execute('PRAGMA table_info(orders)')}:
    c.execute('ALTER TABLE orders ADD COLUMN fee INTEGER NOT NULL DEFAULT 0')
   if 'order_id' not in {row[1] for row in c.execute('PRAGMA table_info(investment_notes)')}:
@@ -123,7 +125,10 @@ def init():
   for existing in c.execute('SELECT id,seed,day FROM rooms').fetchall():
    engine.ensure_room(c,existing['id'],existing['seed'],existing['day'],ASSETS)
    engine.record_business_day(c,existing['id'],existing['day'],ASSETS)
-  # Existing games keep their closing prices and balances; financial baselines are added lazily.
+  c.execute('BEGIN IMMEDIATE')
+  for room in c.execute('SELECT * FROM rooms WHERE bond_interest_version=1').fetchall():
+   bond_income.migrate_room(c,room,ASSETS)
+  # Preserve game progress; only earned bond interest is added by the one-time migration.
 init()
 
 def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -153,7 +158,7 @@ def snapshot_value(c,pid,rid,day):
  h=rows(c,'SELECT * FROM holdings WHERE player_id=?',(pid,))
  val=sum(v['qty']*(one(c,'SELECT price FROM prices WHERE room_id=? AND day=? AND asset=?',(rid,day,v['asset'])) or {'price':0})['price'] for v in h)
  dep=one(c,"SELECT COALESCE(SUM(principal),0) AS total FROM deposits WHERE player_id=? AND status='active'",(pid,))['total']
- return p['cash']+val+dep
+ return p['cash']+val+dep+bond_income.summary(c,pid)['unpaid']
 
 def record_all(c,rid,day):
  for p in rows(c,'SELECT id,cash FROM players WHERE room_id=?',(rid,)):
@@ -195,7 +200,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'11.0-market-review'}
+ return {'ok': True,'version':'12.0-periodic-bonds'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -220,7 +225,7 @@ def create_room(b:CreateRoom):
    code=secrets.token_hex(3).upper()
    if not one(c,'SELECT id FROM rooms WHERE code=?',(code,)):break
   secret=secrets.token_urlsafe(32)
-  cur=c.execute('INSERT INTO rooms(name,code,admin_hash,start_cash,seed,created) VALUES(?,?,?,?,?,?)',(b.name.strip(),code,digest(b.password),b.start_cash,secrets.randbelow(1000000000),now()))
+  cur=c.execute('INSERT INTO rooms(name,code,admin_hash,start_cash,seed,created,bond_interest_version) VALUES(?,?,?,?,?,?,2)',(b.name.strip(),code,digest(b.password),b.start_cash,secrets.randbelow(1000000000),now()))
   rid=cur.lastrowid
   c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
   c.execute('INSERT INTO sessions(token_hash,room_id,player_id,role,created) VALUES(?,?,NULL,?,?)',(digest(secret),rid,'admin',now()))
@@ -259,7 +264,7 @@ def state(authorization:str|None=Header(None)):
  s=session(authorization)
  with conn() as c:
   c.execute('BEGIN')
-  r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood,generation FROM rooms WHERE id=?',(s['room_id'],)))
+  r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood,generation,bond_interest_version FROM rooms WHERE id=?',(s['room_id'],)))
   engine.ensure_room(c,r['id'],one(c,'SELECT seed FROM rooms WHERE id=?',(r['id'],))['seed'],r['day'],ASSETS)
   prices=rows(c,'SELECT asset,price,change FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   price_map={x['asset']:x for x in prices}
@@ -267,6 +272,7 @@ def state(authorization:str|None=Header(None)):
        'news':rows(c,'SELECT id,day,title,body,sector,kind,source,certainty,event_id,related_assets,lens,horizon,expected_start,expected_end,metrics FROM news WHERE room_id=? AND day<=? AND active=1 ORDER BY day DESC,id DESC LIMIT 500',(r['id'],r['day'])),
        'players_count':one(c,'SELECT COUNT(*) n FROM players WHERE room_id=?',(r['id'],))['n']}
   out['fee_policy']=FEE_POLICY
+  out['bond_policy']=bond_income.policy(r)
   out.update(engine.public_data(c,r['id'],r['day']))
   for n in out['news']:
    n['related_assets']=json.loads(n['related_assets'])
@@ -277,6 +283,7 @@ def state(authorization:str|None=Header(None)):
    deposits=rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,))
    orders=rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,))
    out.update(learning_data(c,pid,r['id']))
+   out['bond_income']=bond_income.summary(c,pid)
    p['fees_paid']=paid_fees(c,pid)
    p['day_ready']=bool(one(c,'SELECT 1 FROM day_ready WHERE room_id=? AND player_id=? AND day=?',(r['id'],pid,r['day'])))
    p['net']=snapshot_value(c,pid,r['id'],r['day']); p['profit']=p['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
@@ -311,7 +318,7 @@ def admin_student(pid:int,authorization:str|None=Header(None)):
   player['fees_paid']=paid_fees(c,pid)
   player['net']=snapshot_value(c,pid,r['id'],r['day'])
   player['profit']=player['net']-r['start_cash']-one(c,"SELECT COALESCE(SUM(amount),0) v FROM ledgers WHERE player_id=? AND kind='teacher'",(pid,))['v']
-  return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),
+  return {**learning_data(c,pid,r['id']),'player':player,'holdings':holding_rows(c,pid),'bond_income':bond_income.summary(c,pid),
     'deposits':rows(c,'SELECT * FROM deposits WHERE player_id=? ORDER BY id DESC',(pid,)),
     'orders':rows(c,'SELECT id,asset,side,qty,price,fee,status,reason,evidence_ids,created,filled_day FROM orders WHERE player_id=? ORDER BY id DESC LIMIT 70',(pid,)),
     'ledger':rows(c,'SELECT day,kind,amount,note FROM ledgers WHERE player_id=? ORDER BY id DESC LIMIT 50',(pid,)),
@@ -470,16 +477,7 @@ def close_trading_day(c,r):
   c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,o['player_id'],r['day'],'trade',value*(-1 if o['side']=='buy' else 1),f"{o['asset']} {'매수' if o['side']=='buy' else '매도'} {o['qty']}주"))
   filled+=1
  c.execute("UPDATE rooms SET phase=? WHERE id=?",('finished' if r['day']==24 else 'closed',rid))
- # Bond coupons paid on the final day; simulate annual coupon on holdings.
- if r['day']==24:
-  for p in rows(c,'SELECT id FROM players WHERE room_id=?',(rid,)):
-   coupon=0
-   for h in rows(c,'SELECT * FROM holdings WHERE player_id=?',(p['id'],)):
-    a=AMAP[h['asset']]
-    if a['type']=='bond':coupon+=round(10000*a['yield']*h['qty'])
-   if coupon:
-    c.execute('UPDATE players SET cash=cash+? WHERE id=?',(coupon,p['id']))
-    c.execute('INSERT INTO ledgers(room_id,player_id,day,kind,amount,note) VALUES(?,?,?,?,?,?)',(rid,p['id'],24,'interest',coupon,'연말 채권 이자'))
+ bond_income.close_day(c,r,ASSETS)
  record_all(c,rid,r['day'])
  log(c,rid,r['day'],'close',f'마감: 체결 {filled}건, 거절 {rejected}건')
  return {'ok':True,'filled':filled,'rejected':rejected}
@@ -669,7 +667,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'11.0-market-review'}
+def health():return {'ok':True,'db':str(DB.name),'version':'12.0-periodic-bonds'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -829,6 +827,8 @@ def demo_state():
    'holdings':holdings,'deposits':[],'orders':[],'ledger':[],'values':[{'day':1,'net':100000,'cash':56200},{'day':6,'net':net,'cash':56200}],
    'read_ids':[],'watchlist':['HBEL','GRTB','MORB'],'notes':[],'learning':{'read_count':0,'note_count':0,'evidence_trades':0,'reflection_count':0},
    'histories':histories,**engine.public_data(c,rid,6)}
+  out['bond_policy']=bond_income.policy({**out['room'],'bond_interest_version':2})
+  out['bond_income']={'unpaid':0,'paid':0,'items':[]}
   out.update(guides.public_guides(out,{'start_day':4,'end_day':6,'source':'우리 반 실제 체결','ranking':'체결금액','items':[]}))
   return out
  finally:c.close()

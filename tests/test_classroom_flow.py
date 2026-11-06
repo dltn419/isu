@@ -60,11 +60,11 @@ def test_advance_failure_rolls_back_close_and_prices(classroom, monkeypatch):
     assert before == after
 
 
-def test_full_year_advance_keeps_reports_maturities_and_one_final_coupon(classroom):
+def test_full_year_advance_keeps_reports_maturities_and_eight_bond_payments(classroom):
     c, teacher, learner = classroom
     assert c.post('/api/deposits', headers=learner, json={'term': 24, 'principal': 10000}).status_code == 200
     assert c.post('/api/orders', headers=learner, json={
-        'asset': 'GOV', 'side': 'buy', 'qty': 1, 'reason': '연말 이자 확인'}).status_code == 200
+        'asset': 'GOV', 'side': 'buy', 'qty': 1, 'reason': '3일 간격 이자 확인'}).status_code == 200
     for day in range(1, 24):
         assert advance(c, teacher, day).status_code == 200
         state = c.get('/api/state', headers=learner).json()
@@ -76,8 +76,12 @@ def test_full_year_advance_keeps_reports_maturities_and_one_final_coupon(classro
     assert advance(c, teacher, 24).status_code == 409
     final = c.get('/api/state', headers=learner).json()
     assert final['room']['phase'] == 'finished'
-    assert final['player']['cash'] == cash_before + 1000
-    assert len([x for x in final['ledger'] if x['note'] == '연말 채권 이자']) == 1
+    assert final['player']['cash'] == cash_before + 125
+    payments = [x for x in final['ledger'] if x['note'].startswith('채권 이자') ]
+    assert sorted(x['day'] for x in payments) == list(range(3,25,3))
+    assert sum(x['amount'] for x in payments) == 1000
+    assert final['bond_income']['paid'] == 1000
+    assert final['bond_income']['unpaid'] == 0
 
 
 def test_successful_activity_resumes_choice_and_failed_activity_keeps_it(classroom):

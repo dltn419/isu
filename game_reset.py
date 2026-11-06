@@ -7,6 +7,7 @@ import classroom_engine as engine
 
 
 ROOM_TABLES = (
+    'bond_accruals', 'bond_payments',
     'reading_log', 'investment_notes', 'day_ready', 'daily_values',
     'orders', 'deposits', 'ledgers', 'news', 'logs', 'prices',
     'event_expectations', 'market_estimates', 'operating_effects',
@@ -30,7 +31,7 @@ def collect_snapshot(c, room):
     rid = room['id']
     snapshot = {
         'format': 'haru-play-backup-v1',
-        'room': {k: room[k] for k in ('id', 'name', 'code', 'day', 'phase', 'start_cash', 'seed', 'mood', 'generation')},
+        'room': {k: room[k] for k in ('id', 'name', 'code', 'day', 'phase', 'start_cash', 'seed', 'mood', 'generation', 'bond_interest_version')},
         'players': [dict(r) for r in c.execute('SELECT id,name,cash FROM players WHERE room_id=?', (rid,))],
         'tables': {},
     }
@@ -57,7 +58,7 @@ def reset_room(c, room, assets, timestamp):
     if seed == room['seed']:
         seed = (seed + 1) % 1000000000
     generation = room['generation'] + 1
-    c.execute("UPDATE rooms SET day=1,phase='trading',mood='neutral',seed=?,generation=? WHERE id=?",
+    c.execute("UPDATE rooms SET day=1,phase='trading',mood='neutral',seed=?,generation=?,bond_interest_version=2 WHERE id=?",
               (seed, generation, rid))
     c.execute('UPDATE players SET cash=? WHERE room_id=?', (room['start_cash'], rid))
     c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',
