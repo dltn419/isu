@@ -8,11 +8,11 @@ const root = path.resolve(__dirname, '../static');
 const fixture = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
-async function build(role) {
+async function build(role, search=process.env.HARU_DESIGN?'?design='+process.env.HARU_DESIGN:'') {
   const errors = [], calls = [], vc = new VirtualConsole();
   vc.on('jsdomError', error => errors.push(error.message));
   const dom = new JSDOM('<div id="app"></div><div id="toast"></div><div id="modal-root"></div>', {
-    url:'http://localhost', runScripts:'dangerously', virtualConsole:vc
+    url:'http://localhost/'+search, runScripts:'dangerously', virtualConsole:vc
   });
   const w = dom.window, state = structuredClone(fixture[role]);
   w.scrollTo = () => {};
@@ -40,7 +40,7 @@ async function build(role) {
     }
     return {ok:true, json:async () => structuredClone(data)};
   };
-  for(const name of ['core.js','guides.js','trade.js','ending.js','research.js']) {
+  for(const name of ['design.js','core.js','guides.js','trade.js','ending.js','research.js']) {
     const script = w.document.createElement('script');
     script.textContent = fs.readFileSync(path.join(root,name), 'utf8');
     w.document.body.appendChild(script);
@@ -50,6 +50,38 @@ async function build(role) {
 }
 
 (async () => {
+  {
+    const {dom,w,errors,calls}=await build('student','?design=editorial&compare=1&code=ABCD12#news'),d=w.document;
+    assert.equal(w.currentDesign(),'editorial');assert.ok(d.querySelector('#design-comparison'));
+    await w.detail('HBEL');w.setTradeEntryMode('amount');
+    const amount=d.querySelector('#orderAmount'),reason=d.querySelector('#reason');
+    amount.value='30000';reason.value='같은 화면에서 디자인을 비교해요';w.updateOrderTotal();
+    const evidence=d.querySelector('#trade-evidence input');if(evidence)evidence.checked=true;
+    const count=calls.length;
+    d.querySelector('[data-design-choice="classic"]').click();
+    assert.equal(w.currentDesign(),'classic');assert.equal(amount,d.querySelector('#orderAmount'));
+    assert.equal(amount.value,'30000');assert.equal(reason.value,'같은 화면에서 디자인을 비교해요');
+    if(evidence)assert.equal(evidence.checked,true);
+    assert.equal(w.location.search,'?design=classic&compare=1&code=ABCD12');assert.equal(w.location.hash,'#news');
+    assert.equal(d.querySelector('[data-design-choice="classic"]').getAttribute('aria-pressed'),'true');
+    d.querySelector('[data-design-choice="editorial"]').click();
+    assert.equal(w.currentDesign(),'editorial');assert.equal(calls.length,count,'comparing styles must never make API requests');
+    const article=fixture.student.news.find(n=>n.kind!=='briefing');w.openArticle(article.id);await tick();
+    const modal=d.querySelector('#modal-root .modal');assert.ok(modal);
+    w.setDesignPreview('classic');assert.equal(d.querySelector('#modal-root .modal'),modal,'keep the current article open');
+    w.closeModal();w.setDesignPreview('editorial');w.closeDesignComparison();
+    assert.equal(d.querySelector('#design-comparison'),null);assert.equal(w.currentDesign(),'editorial');
+    assert.equal(w.location.search,'?design=editorial&compare=0&code=ABCD12');
+    assert.equal(d.documentElement.hasAttribute('data-design-comparison'),false);
+    assert.deepEqual(errors,[]);dom.window.close();
+    for(const search of ['','?design=unknown','?design=editorial&compare=0']){
+      const {dom,w,errors}=await build('demo',search);
+      assert.equal(w.currentDesign(),search.includes('editorial')?'editorial':'classic');
+      assert.equal(w.document.querySelector('#design-comparison'),null);
+      assert.deepEqual(errors,[]);dom.window.close();
+    }
+    console.log('design comparison: safe default, URL controls, retained inputs/evidence/article, no API writes and dismissal passed');
+  }
   for(const role of ['student','teacher']) {
     const {dom,w,errors,calls} = await build(role);
     const d = w.document;

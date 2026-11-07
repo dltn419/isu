@@ -245,7 +245,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'21.0-amount-orders'}
+ return {'ok': True,'version':'22.0-design-comparison'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -798,7 +798,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'21.0-amount-orders'}
+def health():return {'ok':True,'db':str(DB.name),'version':'22.0-design-comparison'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
