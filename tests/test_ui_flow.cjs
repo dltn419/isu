@@ -40,7 +40,7 @@ async function build(role, search=process.env.HARU_DESIGN?'?design='+process.env
     }
     return {ok:true, json:async () => structuredClone(data)};
   };
-  for(const name of ['design.js','core.js','guides.js','trade.js','ending.js','research.js']) {
+  for(const name of ['design.js','core.js','guides.js','trade.js','ending.js','spectator.js','research.js']) {
     const script = w.document.createElement('script');
     script.textContent = fs.readFileSync(path.join(root,name), 'utf8');
     w.document.body.appendChild(script);

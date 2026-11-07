@@ -2,7 +2,7 @@
 import os, json, secrets, hashlib, sqlite3, random, math, datetime, io, base64, asyncio, logging
 from pathlib import Path
 from contextlib import contextmanager, asynccontextmanager, suppress
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -16,6 +16,7 @@ import classroom_progression as progression
 import news_reading
 import etf_portfolio
 import game_finale
+import ai_spectator
 from functools import lru_cache
 
 ROOT=Path(__file__).resolve().parent
@@ -251,7 +252,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'23.0-room-design'}
+ return {'ok': True,'version':'24.0-ai-spectator'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -816,7 +817,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'23.0-room-design'}
+def health():return {'ok':True,'db':str(DB.name),'version':'24.0-ai-spectator'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -991,6 +992,14 @@ def demo_state():
 
 @app.get('/api/demo')
 def demo():return demo_state()
+
+@app.get('/api/spectator')
+def spectator_replay(scenario:int=Query(default=0,ge=0,le=63),mood:Literal['neutral','positive','negative']='neutral'):
+ try:return ai_spectator.get_replay(scenario,mood)
+ except ai_spectator.SpectatorBusy:
+  raise HTTPException(status_code=429,detail='다른 관전 경기를 준비 중이에요. 잠시 뒤 다시 시작해 주세요.',headers={'Retry-After':'2'})
+ except ai_spectator.SpectatorFailure:
+  raise HTTPException(status_code=503,detail='관전 경기를 준비하지 못했어요. 다시 시작해 주세요.')
 
 # Optional, explicit one-time operator request for the user's current reset.
 # The request ID is recorded in SQLite; a restart cannot apply it a second time.
