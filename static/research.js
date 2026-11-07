@@ -426,7 +426,8 @@ function render(){
  $('#page').innerHTML=(S.room.phase==='finished'&&S.finale&&tab==='home'?'':sectionTabs()+breakingBanner())+view();if(currentView()==='detail'&&$('#qty'))restoreTradeDraft();if(currentView()==='journal'&&$('#note-horizon')){$('#note-horizon').value=noteDraft.horizon;document.querySelectorAll('#note-evidence input').forEach(el=>el.checked=(noteDraft.ids||[]).includes(+el.value)||+el.value===evidenceDraft)}if(currentView()==='bank'&&(S.role==='player'||(isPreview()&&previewData)))bankCalc();if(S.role==='admin'&&tab==='home'&&S.room.phase!=='finished')loadShare();updateClassClock();
 }
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();if(e.key==='Tab'&&$('#modal-root .modal')){const all=[...$('#modal-root .modal').querySelectorAll('button,input,select,textarea,[tabindex="0"]')].filter(el=>!el.disabled),first=all[0],last=all.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}}});
-if(token){$('#app').innerHTML='<div class="loading"><div><div class="pulse"></div>투자 연구소에 연결하고 있어요.</div></div>';refresh()}else render();
+let initialClassroomLoad=Promise.resolve();
+if(token){$('#app').innerHTML='<div class="loading"><div><div class="pulse"></div>투자 연구소에 연결하고 있어요.</div></div>';initialClassroomLoad=refresh()}else render();
 setInterval(()=>{if(spectatorActive()||!token||!S||S.demo||document.visibilityState!=='visible'||$('#modal-root')?.children.length)return;let el=document.activeElement;if(el&&['INPUT','SELECT','TEXTAREA'].includes(el.tagName))return;refresh(true)},12000);
 
 setInterval(()=>{updateClassClock();pollProgression()},1000);

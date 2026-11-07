@@ -1,15 +1,15 @@
 /* Spectator playback: deterministic clock, no browser and no classroom writes. */
 const {JSDOM,VirtualConsole}=require('jsdom');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const root=path.resolve(__dirname,'../static'),replay=JSON.parse(fs.readFileSync(process.argv[2],'utf8')),fixture=JSON.parse(fs.readFileSync(process.argv[3],'utf8'));
+const root=path.resolve(__dirname,'../static'),replay=JSON.parse(fs.readFileSync(process.argv[2],'utf8')),fixture=JSON.parse(fs.readFileSync(process.argv[3],'utf8')),fundedReplay=JSON.parse(fs.readFileSync(process.argv[4],'utf8'));
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
-async function build({teacher=false,url='http://localhost/'}={}){
+async function build({teacher=false,url='http://localhost/',roomCash=100000,delayState=false}={}){
  const errors=[],calls=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message));
  const dom=new JSDOM('<div id="app"></div><div id="toast"></div><div id="modal-root"></div>',{url,runScripts:'dangerously',virtualConsole:vc});
  const w=dom.window;w.scrollTo=()=>{};w.structuredClone=structuredClone;w.setInterval=()=>0;w.confirm=()=>true;
  Object.defineProperty(w.document,'visibilityState',{configurable:true,get:()=> 'visible'});
  if(teacher)w.localStorage.setItem('haru_token','teacher-test');
- w.fetch=async(url,options={})=>{calls.push({url,options});const data=url.startsWith('/api/spectator')?replay:url==='/api/state'?fixture.teacher:url==='/api/demo'?fixture.demo:{ok:true,status:'offline'};return{ok:true,status:200,json:async()=>structuredClone(data)}};
+ w.fetch=async(url,options={})=>{calls.push({url,options});if(url==='/api/state'&&delayState)await new Promise(resolve=>setTimeout(resolve,20));let data=url.startsWith('/api/spectator')?(new URL(url,'http://localhost').searchParams.get('start_cash')==='500000'?fundedReplay:replay):url==='/api/state'?{...fixture.teacher,room:{...fixture.teacher.room,start_cash:roomCash}}:url==='/api/demo'?fixture.demo:{ok:true,status:'offline'};return{ok:true,status:200,json:async()=>structuredClone(data)}};
  for(const name of ['design.js','core.js','guides.js','trade.js','ending.js','spectator.js','research.js']){const el=w.document.createElement('script');el.textContent=fs.readFileSync(path.join(root,name),'utf8');w.document.body.appendChild(el)}
  await tick();return{dom,w,errors,calls};
 }
@@ -72,8 +72,45 @@ async function build({teacher=false,url='http://localhost/'}={}){
   console.log('spectator: create-form preservation, cancelled loading and reopening passed');
  }
  {
+  const {dom,w,errors,calls}=await build(),d=w.document;
+  w.eval("authMode='create';render()");d.querySelector('#startCash').value='500000';
+  await w.openSpectator();
+  assert.ok(calls.at(-1).url.includes('start_cash=500000'));
+  assert.equal(w.eval('spectator.data.initial_cash'),500000);
+  assert.equal(d.querySelector('.watch-start-cash strong').textContent,'500,000원');
+  assert.ok(d.querySelector('.watch-chart-section .sub').textContent.includes('500,000원'));
+  assert.ok([...d.querySelectorAll('.watch-bot>strong')].every(el=>el.textContent==='500,000원'));
+  await w.startSpectatorGame();assert.ok(calls.at(-1).url.includes('start_cash=500000'));
+  w.pauseSpectator();let guard=0;while(!w.eval('spectator.finished')&&guard++<30)w.nextSpectatorDay();
+  assert.ok(d.querySelector('.watch-final').textContent.includes('550,000원'));
+  w.eval('spectator.data.initial_cash=56789');assert.ok(w.spectatorDepositBenchmark().includes('61,789원'));assert.ok(w.spectatorDepositBenchmark().includes('6,789원'));
+  w.eval('spectator.data.initial_cash=1000');assert.ok(w.spectatorDepositBenchmark().includes('최소 가입액'));
+  await w.exitSpectator();assert.equal(d.querySelector('#startCash').value,'500000');
+  assert.equal(new URL(w.location.href).searchParams.has('start_cash'),false);
+  for(const value of ['','999','100000001','1000.5']){d.querySelector('#startCash').value=value;const before=calls.length;await w.openSpectator();assert.equal(w.spectatorActive(),false);assert.equal(calls.length,before)}
+  assert.deepEqual(errors,[]);dom.window.close();console.log('spectator: creation amount, actual replay, amounts, benchmark, new game and invalid input passed');
+ }
+ {
+  const {dom,w,errors,calls}=await build({teacher:true,roomCash:500000});
+  await w.openSpectator();assert.ok(calls.at(-1).url.includes('start_cash=500000'));assert.equal(w.eval('spectator.data.initial_cash'),500000);
+  const snapshot=w.eval('JSON.stringify(S)');await w.exitSpectator();assert.equal(w.eval('JSON.stringify(S)'),snapshot);
+  assert.equal(calls.filter(c=>c.options.method==='POST').length,0);
+  assert.deepEqual(errors,[]);dom.window.close();console.log('spectator: existing room amount applied without classroom mutations');
+ }
+ {
+  const {dom,w,errors,calls}=await build({teacher:true,roomCash:500000,delayState:true,url:'http://localhost/?watch=1&start_cash=100000'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+  assert.equal(w.eval('spectator.data.initial_cash'),500000);assert.ok(calls.find(c=>c.url.startsWith('/api/spectator')).url.includes('start_cash=500000'));
+  assert.deepEqual(errors,[]);dom.window.close();console.log('spectator: direct link waits for room amount before starting');
+ }
+ {
   const {dom,w,errors}=await build({url:'http://localhost/?watch=1'});await tick();
   assert.equal(w.spectatorActive(),true);assert.equal(w.eval('spectator.loading'),false);
   assert.deepEqual(errors,[]);dom.window.close();console.log('spectator: direct watch link passed');
+ }
+ {
+  const {dom,w,errors}=await build({url:'http://localhost/?watch=1&start_cash=500000'});await tick();
+  assert.equal(w.eval('spectator.data.initial_cash'),500000);
+  assert.deepEqual(errors,[]);dom.window.close();console.log('spectator: shared link retains starting cash');
  }
 })().catch(e=>{console.error(e);process.exitCode=1});

@@ -1,17 +1,26 @@
 /* Public, read-only replay. S and the current classroom token are never replaced. */
-const spectator={active:false,loading:false,error:'',data:null,dayIndex:0,eventIndex:-1,elapsed:0,seconds:15,playing:false,finished:false,players:[],seen:[],scenario:0,mood:'neutral',filter:'all',logLimit:24,lastTick:0,request:0,controller:null};
+const spectator={active:false,loading:false,error:'',data:null,dayIndex:0,eventIndex:-1,elapsed:0,seconds:15,playing:false,finished:false,players:[],seen:[],scenario:0,mood:'neutral',startCash:100000,filter:'all',logLimit:24,lastTick:0,request:0,controller:null};
 const spectatorProfiles=[{id:'news',name:'하루',style:'뉴스 판단형',color:'#28664f'},{id:'balanced',name:'모아',style:'분산 투자형',color:'#376e9a'},{id:'swing',name:'번개',style:'단기 매매형',color:'#a46930'}];
 function spectatorActive(){return spectator.active}
 function spectatorEntry(){return `<section class="spectator-entry"><div><b>AI 3명의 투자를 구경해 볼까요?</b><p>성향이 다른 자동 투자자들의 별도 경기예요. 우리 반 날짜와 자산에는 영향을 주지 않아요.</p></div><button type="button" class="btn secondary" onclick="openSpectator()">AI 투자 관전 ${icon('arrow')}</button></section>`}
-function openSpectator(){
+function spectatorStartingCash(){
+ const input=$('#startCash'),query=new URLSearchParams(location.search);
+ const value=S&&!S.demo?S.room.start_cash:input?.value??roomCreationDraft?.cash??query.get('start_cash')??100000;
+ const amount=Number(value);
+ if(!Number.isSafeInteger(amount)||amount<1000||amount>100000000){toast('시작 자금은 1,000원부터 100,000,000원까지 원 단위로 입력해 주세요.');input?.focus();return null}
+ return amount;
+}
+async function openSpectator(){
  if(spectator.active)return;
+ if(token&&!S){await initialClassroomLoad;if(token&&!S){toast('게임방 정보를 불러온 뒤 관전을 시작해 주세요.');return}if(spectator.active)return}
+ const startCash=spectatorStartingCash();if(startCash===null)return;spectator.startCash=startCash;
  captureRoomCreationDraft();captureTradeDraft();closeModal();spectator.active=true;
- const url=new URL(location.href);url.searchParams.set('watch','1');window.history.replaceState(null,'',url.pathname+url.search+url.hash);
- renderSpectator();startSpectatorGame(false);
+ const url=new URL(location.href);url.searchParams.set('watch','1');url.searchParams.set('start_cash',String(startCash));window.history.replaceState(null,'',url.pathname+url.search+url.hash);
+ renderSpectator();await startSpectatorGame(false);
 }
 async function exitSpectator(){
  spectator.active=false;spectator.playing=false;spectator.loading=false;spectator.request++;spectator.controller?.abort();closeModal();
- const url=new URL(location.href);url.searchParams.delete('watch');window.history.replaceState(null,'',url.pathname+url.search+url.hash);
+ const url=new URL(location.href);url.searchParams.delete('watch');url.searchParams.delete('start_cash');window.history.replaceState(null,'',url.pathname+url.search+url.hash);
  render();if(S&&!S.demo&&token)await refresh(true);
 }
 async function startSpectatorGame(next=true){
@@ -23,13 +32,13 @@ async function startSpectatorGame(next=true){
  try{
   let response;
   for(let attempt=0;attempt<5;attempt++){
-   response=await fetch('/api/spectator?scenario='+spectator.scenario+'&mood='+encodeURIComponent(spectator.mood),{signal:controller.signal});
+   response=await fetch('/api/spectator?scenario='+spectator.scenario+'&mood='+encodeURIComponent(spectator.mood)+'&start_cash='+spectator.startCash,{signal:controller.signal});
    if(response.status!==429||attempt===4)break;
    await new Promise(resolve=>setTimeout(resolve,2000));if(!spectator.active||request!==spectator.request)return;
   }
   let data;try{data=await response.json()}catch{throw Error('서버 응답을 확인하지 못했어요. 잠시 뒤 다시 시작해 주세요.')}if(!response.ok)throw Error(data.detail||'관전 경기를 준비하지 못했어요.');
   if(!spectator.active||request!==spectator.request)return;
-  if(!Array.isArray(data.frames)||data.frames.length!==24||data.bots?.length!==3)throw Error('관전 경기 데이터를 다시 확인해 주세요.');
+  if(!Array.isArray(data.frames)||data.frames.length!==24||data.bots?.length!==3||data.initial_cash!==spectator.startCash)throw Error('관전 경기의 시작 자금과 데이터를 다시 확인해 주세요.');
   spectator.data=data;spectator.loading=false;restartSpectator();
  }catch(e){if(!spectator.active||request!==spectator.request||e.name==='AbortError')return;spectator.loading=false;spectator.error=e.message;updateSpectatorBoard()}
 }
@@ -75,6 +84,12 @@ function tickSpectator(now=Date.now()){
  if(spectator.elapsed>=spectator.seconds)finishSpectatorDay();else updateSpectatorClock();
 }
 function spectatorBot(id){return(spectator.data?.bots||spectatorProfiles).find(b=>b.id===id)}
+function spectatorDepositBenchmark(){
+ const cash=spectator.data.initial_cash,principal=Math.floor(cash/10000)*10000;
+ if(!principal)return '시작 자금이 예금 최소 가입액 10,000원보다 적어 전액 예금 비교는 생략해요.';
+ const total=cash+Math.round(principal*.1);
+ return (principal===cash?'시작 자금을 24일 예금에 맡겼다면 ':`24일 예금에 ${money(principal)}, 남은 ${money(cash-principal)}을 현금으로 뒀다면 `)+money(total)+'이에요.';
+}
 function spectatorRank(players,p){return(players.filter(x=>x.net===p.net).length>1?'공동 ':'')+(players.filter(x=>x.net>p.net).length+1)+'위'}
 function spectatorEventTitle(event){
  const name=spectatorBot(event.bot_id)?.name||'투자자',unit=spectator.data?.assets.find(a=>a.id===event.asset)?.type==='gold'?'g':'주';
@@ -90,10 +105,10 @@ function spectatorEvidence(event){return(event.evidence_ids||[]).map(id=>`<butto
 function spectatorEventMarkup(event,compact=false){const bot=spectatorBot(event.bot_id);return `<article class="watch-event ${compact?'compact':''}" style="--bot-color:${bot.color}"><div class="watch-event-meta"><b>${event.day}일차</b><span>${esc(bot.style)}</span>${event.automatic?'<span class="watch-auto">자동 처리</span>':''}</div><h3>${esc(spectatorEventTitle(event))}</h3>${spectatorTradeCost(event)?`<div class="watch-trade-cost">${esc(spectatorTradeCost(event))}</div>`:''}<p>${esc(event.reason)}</p>${spectatorEvidence(event)}</article>`}
 function renderSpectator(){
  if(!spectator.active)return;
- $('#app').innerHTML=`<div class="watch-shell" id="watch-root"><header class="watch-header">${brand()}<div><span class="watch-readonly">별도 경기 · 읽기 전용</span><button type="button" class="text-btn" onclick="exitSpectator()">${S&&!S.demo?'우리 반으로 돌아가기':'입장 화면으로'} ${icon('arrow')}</button></div></header><main class="watch-main"><div class="watch-title"><div><p class="watch-kicker">세 가지 성향, 같은 시장</p><h1>AI 3명의 24일</h1><p>공개된 뉴스·실적·가격으로 판단하는 규칙형 자동 투자자예요. 누가 무엇을 선택하고 왜 그랬는지 함께 살펴보세요.</p></div><span class="watch-start-cash">각자 시작 자금<strong>100,000원</strong></span></div>
+ $('#app').innerHTML=`<div class="watch-shell" id="watch-root"><header class="watch-header">${brand()}<div><span class="watch-readonly">별도 경기 · 읽기 전용</span><button type="button" class="text-btn" onclick="exitSpectator()">${S&&!S.demo?'우리 반으로 돌아가기':'입장 화면으로'} ${icon('arrow')}</button></div></header><main class="watch-main"><div class="watch-title"><div><p class="watch-kicker">세 가지 성향, 같은 시장</p><h1>AI 3명의 24일</h1><p>공개된 뉴스·실적·가격으로 판단하는 규칙형 자동 투자자예요. 누가 무엇을 선택하고 왜 그랬는지 함께 살펴보세요.</p></div><span class="watch-start-cash">각자 시작 자금<strong>${money(spectator.startCash)}</strong></span></div>
  ${S&&!S.demo&&S.progression?.timer_enabled?'<p class="notice">별도 관전 경기예요. 관전 중에도 우리 반 시간 모드는 계속 진행돼요.</p>':''}
  <section class="watch-controls" aria-label="관전 재생 설정"><div class="watch-play-buttons"><button type="button" class="btn dark" id="watch-play" onclick="toggleSpectator()">일시정지</button><button type="button" class="btn ghost" id="watch-next-choice" onclick="nextSpectatorChoice()">다음 선택</button><button type="button" class="btn ghost" id="watch-next-day" onclick="nextSpectatorDay()">다음 날</button></div><div class="watch-settings"><label for="watch-speed">하루 재생 시간<select class="input" id="watch-speed" onchange="setSpectatorSpeed(this.value)">${[[5,'5초'],[15,'15초'],[60,'1분']].map(([k,label])=>`<option value="${k}" ${spectator.seconds===k?'selected':''}>${label}</option>`).join('')}</select></label><label for="watch-mood">새 경기 뉴스 분위기<select class="input" id="watch-mood" onchange="setSpectatorMood(this.value)">${[['neutral','중립'],['positive','긍정'],['negative','부정']].map(([k,label])=>`<option value="${k}" ${spectator.mood===k?'selected':''}>${label}</option>`).join('')}</select></label><button type="button" class="btn secondary" id="watch-new" onclick="startSpectatorGame()">새 경기</button><button type="button" class="text-btn" id="watch-restart" onclick="restartSpectator()">처음부터</button></div><p id="watch-setting-note">속도는 재생에만 적용돼요. 분위기를 바꾸면 새 경기부터 적용해요.</p></section>
- <div id="spectator-live" class="watch-sr-only" role="status" aria-live="polite"></div><div id="watch-status"></div><div class="watch-layout"><div class="watch-stage"><section class="watch-time"><div><span id="watch-period">1분기 · 1일차</span><h2 id="watch-phase">AI의 선택을 준비하고 있어요.</h2></div><div><span id="watch-countdown-label">다음 날까지</span><b id="watch-countdown">00:15</b></div><div class="watch-progress" role="progressbar" aria-label="오늘의 진행" aria-valuemin="0" aria-valuemax="100" id="watch-progress"><i></i></div></section><div id="watch-latest"></div><div class="watch-bots" id="watch-bots"></div><section class="watch-chart-section"><div class="section-title"><h2>총자산이 어떻게 바뀌었을까?</h2><span class="sub">시작 10만 원 · 수수료 반영</span></div><div id="watch-chart"></div></section><section class="watch-news-section"><div class="section-title"><h2 id="watch-news-heading">오늘 나온 뉴스</h2><span class="sub">투자자도 이 정보까지 볼 수 있어요.</span></div><div id="watch-news"></div></section><div id="watch-ending"></div><details class="disclosure watch-method"><summary>AI는 어떤 기준으로 판단하나요?</summary><p>하루는 기사의 매출·이익 전망과 공개 실적을 비교해요. 모아는 시장 ETF·국채·금·예금에 나눠 담고 분기마다 비중을 점검해요. 번개는 최근 이틀의 가격과 미리 정한 보유·매도 기준을 살펴요.</p><p>실제 게임의 매매·수수료·예금·채권 이자·24일차 정산을 사용해 별도 경기를 계산한 뒤 재생합니다. 각 투자자는 당시 공개된 정보만 사용하며 미래 가격과 숨겨진 사건 결과를 보지 못해요. 시작 뉴스는 중립이고 선택한 분위기는 2일차부터 적용돼요.</p></details></div><aside class="watch-log-panel"><div class="section-title"><h2>선택 기록</h2><label class="watch-sr-only" for="watch-filter">투자자별 기록</label><select class="input" id="watch-filter" onchange="setSpectatorFilter(this.value)"><option value="all">세 명 모두</option>${spectatorProfiles.map(b=>`<option value="${b.id}" ${spectator.filter===b.id?'selected':''}>${b.name}</option>`).join('')}</select></div><div id="watch-log"></div></aside></div></main></div>`;
+ <div id="spectator-live" class="watch-sr-only" role="status" aria-live="polite"></div><div id="watch-status"></div><div class="watch-layout"><div class="watch-stage"><section class="watch-time"><div><span id="watch-period">1분기 · 1일차</span><h2 id="watch-phase">AI의 선택을 준비하고 있어요.</h2></div><div><span id="watch-countdown-label">다음 날까지</span><b id="watch-countdown">00:15</b></div><div class="watch-progress" role="progressbar" aria-label="오늘의 진행" aria-valuemin="0" aria-valuemax="100" id="watch-progress"><i></i></div></section><div id="watch-latest"></div><div class="watch-bots" id="watch-bots"></div><section class="watch-chart-section"><div class="section-title"><h2>총자산이 어떻게 바뀌었을까?</h2><span class="sub">시작 ${money(spectator.startCash)} · 수수료 반영</span></div><div id="watch-chart"></div></section><section class="watch-news-section"><div class="section-title"><h2 id="watch-news-heading">오늘 나온 뉴스</h2><span class="sub">투자자도 이 정보까지 볼 수 있어요.</span></div><div id="watch-news"></div></section><div id="watch-ending"></div><details class="disclosure watch-method"><summary>AI는 어떤 기준으로 판단하나요?</summary><p>하루는 기사의 매출·이익 전망과 공개 실적을 비교해요. 모아는 시장 ETF·국채·금·예금에 나눠 담고 분기마다 비중을 점검해요. 번개는 최근 이틀의 가격과 미리 정한 보유·매도 기준을 살펴요.</p><p>실제 게임의 매매·수수료·예금·채권 이자·24일차 정산을 사용해 별도 경기를 계산한 뒤 재생합니다. 각 투자자는 당시 공개된 정보만 사용하며 미래 가격과 숨겨진 사건 결과를 보지 못해요. 시작 뉴스는 중립이고 선택한 분위기는 2일차부터 적용돼요.</p></details></div><aside class="watch-log-panel"><div class="section-title"><h2>선택 기록</h2><label class="watch-sr-only" for="watch-filter">투자자별 기록</label><select class="input" id="watch-filter" onchange="setSpectatorFilter(this.value)"><option value="all">세 명 모두</option>${spectatorProfiles.map(b=>`<option value="${b.id}" ${spectator.filter===b.id?'selected':''}>${b.name}</option>`).join('')}</select></div><div id="watch-log"></div></aside></div></main></div>`;
  updateSpectatorBoard();
 }
 function updateSpectatorClock(){
@@ -116,12 +131,12 @@ function updateSpectatorBoard(){
  $('#watch-period').textContent=frame?`${frame.quarter}분기 · ${frame.day}일차 / 24일`:'1분기 · 1일차 / 24일';
  $('#watch-phase').textContent=spectator.finished?'24일의 선택이 모두 끝났어요.':frame?.earnings?'오늘은 분기 실적 발표일이에요.':frame?'같은 소식을 보고도 선택은 달라요.':'AI의 선택을 준비하고 있어요.';
  const latest=spectator.seen.at(-1);$('#watch-latest').innerHTML=latest?`<div class="watch-latest-label">${latest.automatic?'방금 반영된 정산':'방금 한 선택'}</div>${spectatorEventMarkup(latest,true)}`:'<div class="watch-first-prompt">곧 첫 선택이 시작돼요. 일시정지하거나 ‘다음 선택’으로 한 번씩 살펴볼 수 있어요.</div>';
- $('#watch-bots').innerHTML=(data?.bots||spectatorProfiles).map(bot=>{const p=spectator.players.find(p=>p.id===bot.id),last=[...spectator.seen].reverse().find(e=>e.bot_id===bot.id&&!e.automatic);return `<article class="watch-bot" style="--bot-color:${bot.color}"><div class="watch-bot-heading"><span>${esc(bot.name.slice(0,1))}</span><div><h3>${esc(bot.name)}</h3><p>${esc(bot.style)}</p></div></div><strong>${p?money(p.net):'100,000원'}</strong><div class="watch-bot-return ${p?.profit<0?'down':'up'}">${p?pct(p.return_pct):'시작 자금'}</div><dl><div><dt>현금</dt><dd>${p?money(p.cash):'—'}</dd></div><div><dt>거래 수수료</dt><dd>${p?money(p.fees_paid):'—'}</dd></div><div><dt>직접 한 거래</dt><dd>${p?p.trades+'회':'—'}</dd></div></dl><p class="watch-bot-last">${last?esc(spectatorEventTitle(last)):'아직 선택 전이에요.'}</p><button type="button" class="text-btn" onclick="openSpectatorBot('${bot.id}')" ${!p?'disabled':''}>보유 자산·판단 보기 ${icon('chevron')}</button></article>`}).join('');
+ $('#watch-bots').innerHTML=(data?.bots||spectatorProfiles).map(bot=>{const p=spectator.players.find(p=>p.id===bot.id),last=[...spectator.seen].reverse().find(e=>e.bot_id===bot.id&&!e.automatic);return `<article class="watch-bot" style="--bot-color:${bot.color}"><div class="watch-bot-heading"><span>${esc(bot.name.slice(0,1))}</span><div><h3>${esc(bot.name)}</h3><p>${esc(bot.style)}</p></div></div><strong>${money(p?p.net:spectator.startCash)}</strong><div class="watch-bot-return ${p?.profit<0?'down':'up'}">${p?pct(p.return_pct):'시작 자금'}</div><dl><div><dt>현금</dt><dd>${p?money(p.cash):'—'}</dd></div><div><dt>거래 수수료</dt><dd>${p?money(p.fees_paid):'—'}</dd></div><div><dt>직접 한 거래</dt><dd>${p?p.trades+'회':'—'}</dd></div></dl><p class="watch-bot-last">${last?esc(spectatorEventTitle(last)):'아직 선택 전이에요.'}</p><button type="button" class="text-btn" onclick="openSpectatorBot('${bot.id}')" ${!p?'disabled':''}>보유 자산·판단 보기 ${icon('chevron')}</button></article>`}).join('');
  $('#watch-chart').innerHTML=data?spectatorChart():'<p class="sub">경기가 시작되면 세 투자자의 총자산을 같은 차트에서 비교해요.</p>';
  $('#watch-news-heading').textContent=frame?`${frame.day}일차에 나온 뉴스`:'오늘 나온 뉴스';
  const daily=frame?(frame.news_ids||[]).map(id=>data.news.find(n=>n.id===id)).filter(Boolean):[];
  $('#watch-news').innerHTML=daily.length?daily.slice(0,6).map(n=>`<button type="button" class="watch-news-row" onclick="openSpectatorNews(${n.id})"><span>${esc(n.source||'하루경제')} · ${esc(n.certainty||'소식')}${n.is_breaking?' · 속보':''}</span><b>${esc(spectatorNewsTitle(n))}</b><p>${esc((n.reading?.summary||n.body).slice(0,190))}</p></button>`).join(''):'<p class="sub">이날 공개된 기사와 실적을 함께 보여줘요.</p>';
- $('#watch-ending').innerHTML=spectator.finished?`<section class="watch-final"><p class="watch-kicker">경기 ${data.scenario+1} · ${({neutral:'중립',positive:'긍정',negative:'부정'})[data.mood]} 분위기</p><h2>이번 경기의 최종 결과</h2><p>보유 상품 자동 매도와 수수료·예금·채권 이자까지 정산한 금액이에요.</p><div class="tablewrap"><table><thead><tr><th>순위</th><th>투자자</th><th>최종 자산</th><th>수익률</th><th>수수료</th></tr></thead><tbody>${[...spectator.players].sort((a,b)=>b.net-a.net).map((p,i)=>`<tr><td>${spectatorRank(spectator.players,p)}</td><td>${esc(spectatorBot(p.id).name)}</td><td><b>${money(p.net)}</b></td><td class="${p.profit<0?'down':'up'}">${pct(p.return_pct)}</td><td>${money(p.fees_paid)}</td></tr>`).join('')}</tbody></table></div><p class="hint">24일 예금만 유지했다면 110,000원이에요. 새 경기에서는 시장 흐름과 순위가 달라질 수 있어요.</p></section>`:'';
+ $('#watch-ending').innerHTML=spectator.finished?`<section class="watch-final"><p class="watch-kicker">경기 ${data.scenario+1} · ${({neutral:'중립',positive:'긍정',negative:'부정'})[data.mood]} 분위기</p><h2>이번 경기의 최종 결과</h2><p>보유 상품 자동 매도와 수수료·예금·채권 이자까지 정산한 금액이에요.</p><div class="tablewrap"><table><thead><tr><th>순위</th><th>투자자</th><th>최종 자산</th><th>수익률</th><th>수수료</th></tr></thead><tbody>${[...spectator.players].sort((a,b)=>b.net-a.net).map((p,i)=>`<tr><td>${spectatorRank(spectator.players,p)}</td><td>${esc(spectatorBot(p.id).name)}</td><td><b>${money(p.net)}</b></td><td class="${p.profit<0?'down':'up'}">${pct(p.return_pct)}</td><td>${money(p.fees_paid)}</td></tr>`).join('')}</tbody></table></div><p class="hint">${spectatorDepositBenchmark()} 새 경기에서는 시장 흐름과 순위가 달라질 수 있어요.</p></section>`:'';
  updateSpectatorLog();updateSpectatorClock();
 }
 function updateSpectatorLog(){if(!$('#watch-log'))return;const all=spectator.seen.filter(e=>spectator.filter==='all'||e.bot_id===spectator.filter),events=all.slice(-spectator.logLimit).reverse();$('#watch-log').innerHTML=events.length?events.map(e=>spectatorEventMarkup(e)).join('')+(all.length>events.length?`<button type="button" class="btn secondary watch-log-more" onclick="moreSpectatorLog()">이전 선택 더 보기 · ${events.length}/${all.length}</button>`:''):'<p class="watch-log-empty">투자자가 선택하면 여기서 거래와 판단 이유를 바로 확인할 수 있어요.</p>'}

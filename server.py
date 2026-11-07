@@ -252,7 +252,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'24.0-ai-spectator'}
+ return {'ok': True,'version':'25.0-spectator-start-cash'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -817,7 +817,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'24.0-ai-spectator'}
+def health():return {'ok':True,'db':str(DB.name),'version':'25.0-spectator-start-cash'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):
@@ -994,8 +994,8 @@ def demo_state():
 def demo():return demo_state()
 
 @app.get('/api/spectator')
-def spectator_replay(scenario:int=Query(default=0,ge=0,le=63),mood:Literal['neutral','positive','negative']='neutral'):
- try:return ai_spectator.get_replay(scenario,mood)
+def spectator_replay(scenario:int=Query(default=0,ge=0,le=63),mood:Literal['neutral','positive','negative']='neutral',start_cash:int=Query(default=100000,ge=1000,le=100000000)):
+ try:return ai_spectator.get_replay(scenario,mood,start_cash)
  except ai_spectator.SpectatorBusy:
   raise HTTPException(status_code=429,detail='다른 관전 경기를 준비 중이에요. 잠시 뒤 다시 시작해 주세요.',headers={'Retry-After':'2'})
  except ai_spectator.SpectatorFailure:

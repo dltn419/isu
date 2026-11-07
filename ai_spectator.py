@@ -35,11 +35,12 @@ class SpectatorFailure(Exception):
     pass
 
 
-def get_replay(scenario=0, mood='neutral'):
+def get_replay(scenario=0, mood='neutral', start_cash=100000):
     """At most one bounded worker, eight cached games, no persistent room writes."""
-    if type(scenario) is not int or not 0 <= scenario < 64 or mood not in ('neutral', 'positive', 'negative'):
+    if (type(scenario) is not int or not 0 <= scenario < 64 or mood not in ('neutral', 'positive', 'negative')
+            or type(start_cash) is not int or not 1000 <= start_cash <= 100000000):
         raise ValueError('Invalid spectator scenario')
-    key = (scenario, mood)
+    key = (scenario, mood, start_cash)
     with _cache_lock:
         if key in _cache:
             _cache.move_to_end(key)
@@ -51,14 +52,15 @@ def get_replay(scenario=0, mood='neutral'):
             if key in _cache:
                 return _cache[key]
         with tempfile.TemporaryDirectory(prefix='24days-spectator-job-') as directory:
-            worker = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(scenario), mood],
+            worker = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(scenario), mood, str(start_cash)],
                                     capture_output=True, text=True, encoding='utf-8', timeout=45,
                                     cwd=str(Path(__file__).resolve().parent),
                                     env={**os.environ, 'TMPDIR': directory})
         if worker.returncode or len(worker.stdout.encode('utf-8')) > 4_000_000:
             raise SpectatorFailure('Simulation worker failed')
         result = json.loads(worker.stdout)
-        if len(result.get('frames', [])) != 24 or result.get('scenario') != scenario:
+        if (len(result.get('frames', [])) != 24 or result.get('scenario') != scenario
+                or result.get('initial_cash') != start_cash):
             raise SpectatorFailure('Incomplete simulation')
         with _cache_lock:
             _cache[key] = result
@@ -76,7 +78,7 @@ def public_view(state, histories):
     """The full server state can contain teaching internals. Policies get only these."""
     day = state['room']['day']
     return {
-        'day': day, 'cash': state['player']['cash'], 'net': state['player']['net'],
+        'day': day, 'start_cash': state['room']['start_cash'], 'cash': state['player']['cash'], 'net': state['player']['net'],
         'holdings': [{k: h[k] for k in ('asset', 'qty', 'cost')} for h in state['holdings']],
         'deposits': [{k: d[k] for k in ('principal', 'term', 'status')} for d in state['deposits']],
         'assets': [{k: a[k] for k in ('id', 'name', 'sector', 'type', 'risk', 'price', 'change')}
@@ -164,7 +166,12 @@ def plan_actions(bot_id, view, memory):
     elif bot_id == 'balanced':
         weights = {'MKT': .5, 'GOV': .2, 'GOLD': .1}
         if day == 1:
-            actions.append({'type': 'deposit', 'principal': 20000, 'term': 24, 'reason': '시작 자금의 20%는 24일 예금에 맡겨요. 끝까지 유지하면 10% 이자를 받는 안전한 몫으로 정했어요.', 'evidence_ids': []})
+            principal = view['start_cash'] // 5 // 10000 * 10000
+            if principal:
+                actions.append({'type': 'deposit', 'principal': principal, 'term': 24,
+                                'reason': f'시작 자금의 20%를 목표로, 1만 원 단위에 맞춰 {principal:,}원을 24일 예금에 맡겨요. 끝까지 유지하면 10% 이자를 받아요.', 'evidence_ids': []})
+            else:
+                actions.append({'type': 'wait', 'reason': '예금은 최소 1만 원 단위예요. 시작 자금의 20%로는 가입할 수 없어 이 몫은 현금으로 남겨 둬요.', 'evidence_ids': []})
         if day <= 2 or day in (7, 13, 19):
             for aid, weight in weights.items():
                 h = held.get(aid)
@@ -240,11 +247,11 @@ def affordable_quantity(cash, budget, price, fee):
     return low
 
 
-def run_game(srv, scenario, mood):
+def run_game(srv, scenario, mood, start_cash=100000):
     from unittest.mock import patch
     seed = 104729 + scenario * 7919
     with patch.object(srv.secrets, 'randbelow', side_effect=lambda n: seed % n):
-        room = srv.create_room(srv.CreateRoom(name='AI 관전 전용 경기', password='spectator-local-only'))
+        room = srv.create_room(srv.CreateRoom(name='AI 관전 전용 경기', password='spectator-local-only', start_cash=start_cash))
     auth = 'Bearer ' + room['token']
     srv.set_mood(srv.MoodIn(mood=mood), authorization=auth, x_haru_game_generation=None, x_haru_expected_day=None)
     bots = []
@@ -338,7 +345,7 @@ def run_game(srv, scenario, mood):
             with srv.conn() as c:
                 c.execute('BEGIN IMMEDIATE')
                 srv.advance_room(c, srv.one(c, 'SELECT * FROM rooms WHERE id=?', (rid,)))
-    return {'version': 1, 'scenario': scenario, 'mood': mood, 'days': 24, 'initial_cash': 100000,
+    return {'version': 1, 'scenario': scenario, 'mood': mood, 'days': 24, 'initial_cash': start_cash,
             'agent_kind': 'rule-based', 'information': 'published-only', 'fee_policy': srv.FEE_POLICY,
             'bots': BOT_PROFILES, 'assets': [{k: a[k] for k in ('id', 'name', 'sector', 'type')} for a in srv.ASSETS],
             'news': list(news.values()), 'frames': frames,
@@ -347,7 +354,8 @@ def run_game(srv, scenario, mood):
 
 def worker_main():
     scenario, mood = int(sys.argv[1]), sys.argv[2]
-    if not 0 <= scenario < 64 or mood not in ('neutral', 'positive', 'negative'):
+    start_cash = int(sys.argv[3]) if len(sys.argv) > 3 else 100000
+    if not 0 <= scenario < 64 or mood not in ('neutral', 'positive', 'negative') or not 1000 <= start_cash <= 100000000:
         raise ValueError('Invalid spectator scenario')
     with tempfile.TemporaryDirectory(prefix='24days-spectator-') as directory:
         db = Path(directory) / 'spectator.db'
@@ -356,7 +364,7 @@ def worker_main():
         import server
         if server.DB.resolve() != db.resolve():
             raise RuntimeError('Spectator database isolation failed')
-        result = run_game(server, scenario, mood)
+        result = run_game(server, scenario, mood, start_cash)
     print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
 
 

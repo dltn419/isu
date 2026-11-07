@@ -16,6 +16,30 @@ def replay():
     return spectator.get_replay(0, 'neutral')
 
 
+@pytest.fixture(scope='module', params=[1000, 56789, 500000, 100000000])
+def funded_replay(request):
+    return spectator.get_replay(0, 'neutral', request.param)
+
+
+def test_starting_cash_drives_actual_game_and_deposits(funded_replay):
+    cash = funded_replay['initial_cash']
+    opening = funded_replay['frames'][0]['opening']
+    assert all(p['cash'] == p['net'] == cash and p['profit'] == 0 for p in opening)
+    assert len(funded_replay['frames']) == 24
+    deposits = [e for e in funded_replay['frames'][0]['events'] if e['type'] == 'deposit']
+    principal = cash // 5 // 10000 * 10000
+    assert [e['amount'] for e in deposits] == ([principal] if principal else [])
+    for p in funded_replay['final']:
+        assert p['holdings'] == [] and p['net'] == p['cash']
+        assert p['profit'] == p['net'] - cash
+        assert p['return_pct'] == round(p['profit'] / cash * 100, 2)
+        assert p['cash'] >= 0
+    assert spectator.get_replay(0, 'neutral', cash) is funded_replay
+    if cash == 500000:
+        event = next(e for e in funded_replay['frames'][0]['events'] if e['type'] == 'buy' and e['bot_id'] == 'news')
+        assert event['qty'] > 9
+
+
 def test_real_fills_use_current_quotes_and_fees_and_finish_in_cash(replay):
     assert replay['agent_kind'] == 'rule-based' and replay['information'] == 'published-only'
     assert len(replay['frames']) == 24
@@ -103,9 +127,11 @@ def test_spectator_endpoint_isolated_from_real_room_and_preserves_future_run(cla
             return {table: [tuple(r) for r in db.execute('SELECT * FROM '+table)] for table in (
                 'rooms', 'players', 'holdings', 'orders', 'ledgers', 'prices', 'deposits', 'sessions')}
     before = snapshot()
-    response = c.get('/api/spectator', params={'scenario': 1, 'mood': 'positive'})
+    response = c.get('/api/spectator', params={'scenario': 1, 'mood': 'positive', 'start_cash': 500000})
     assert response.status_code == 200, response.text
     assert response.json()['mood'] == 'positive' and len(response.json()['frames']) == 24
+    assert response.json()['initial_cash'] == 500000
+    assert all(p['cash'] == 500000 for p in response.json()['frames'][0]['opening'])
     assert snapshot() == before
     assert c.get('/api/state', headers=learner).json()['room']['day'] == 1
 
@@ -131,7 +157,8 @@ def test_busy_worker_and_failure_are_recoverable(classroom, monkeypatch):
     assert c.get('/api/spectator').status_code == 503
 
 
-@pytest.mark.parametrize('query', ['scenario=-1', 'scenario=64', 'scenario=abc', 'mood=unknown'])
+@pytest.mark.parametrize('query', ['scenario=-1', 'scenario=64', 'scenario=abc', 'mood=unknown',
+                                'start_cash=999', 'start_cash=100000001', 'start_cash=abc', 'start_cash=1000.5'])
 def test_invalid_scenarios_never_start_a_worker(classroom, query, monkeypatch):
     c, teacher, learner = classroom
     def unexpected(*args):
