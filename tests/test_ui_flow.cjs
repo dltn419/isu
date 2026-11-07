@@ -40,7 +40,7 @@ async function build(role) {
     }
     return {ok:true, json:async () => structuredClone(data)};
   };
-  for(const name of ['core.js','guides.js','ending.js','research.js']) {
+  for(const name of ['core.js','guides.js','trade.js','ending.js','research.js']) {
     const script = w.document.createElement('script');
     script.textContent = fs.readFileSync(path.join(root,name), 'utf8');
     w.document.body.appendChild(script);
@@ -365,6 +365,94 @@ async function build(role) {
     assert.ok(!d.querySelector('.news-grid').textContent.includes('식품 업종 기업 소식'));
     assert.deepEqual(errors,[]);dom.window.close();
     console.log('ETF news: constituent/sector/market links, earnings, inverse guidance, evidence, focus and holdings passed');
+  }
+  {
+    const {dom,w,errors,state,calls}=await build('student'),d=w.document;
+    state.assets.find(a=>a.id==='HBEL').price=45000;
+    state.player.cash=100000;state.player.net=325000;
+    state.holdings=[{asset:'HBEL',qty:5,cost:225000,average_cost:45000}];
+    await w.refresh();await w.detail('HBEL');
+    const cases=[
+      [{amount:100000,price:45000,side:'buy',cash:100000},2],
+      [{amount:90000,price:45000,side:'buy',cash:100000},1],
+      [{amount:90014,price:45000,side:'buy',cash:100000},2],
+      [{amount:45000,price:45000,side:'buy',cash:100000},0],
+      [{amount:45007,price:45000,side:'buy',cash:100000},1],
+      [{amount:100000,price:50000,side:'buy',cash:100000},1],
+      [{amount:10000,price:3333,side:'buy',cash:10000},3],
+      [{amount:100000,price:45000,side:'buy',cash:50000},1],
+      [{amount:100000,price:45000,side:'sell',held:5},2],
+      [{amount:100000,price:45000,side:'sell',held:1},1],
+      [{amount:45000,price:45000,side:'sell',held:5},1],
+      [{amount:44999,price:45000,side:'sell',held:5},0],
+      [{amount:100000,price:45000,side:'sell',held:0},0],
+      [{amount:1e12,price:1,side:'buy',cash:1e12},100000],
+      ...[0,-1,100.5,Infinity,NaN,Number.MAX_SAFE_INTEGER+1].map(amount=>[{amount,price:1,side:'buy',cash:100000},0]),
+    ];
+    for(const [input,expected] of cases)assert.equal(w.quantityForAmount(input),expected,JSON.stringify(input));
+    w.setTradeEntryMode('amount');d.querySelector('#orderAmount').value='100000';
+    d.querySelector('#reason').value='정한 금액 안에서 거래할 거예요';
+    const evidence=d.querySelector('#trade-evidence input');evidence.checked=true;const evidenceId=+evidence.value;
+    w.updateOrderTotal();
+    assert.equal(d.querySelector('#qty').value,'2');assert.equal(d.querySelector('#qty').readOnly,true);
+    assert.equal(d.querySelector('#quantity-order-fields').hidden,true);
+    assert.equal(d.querySelector('#amount-order-fields').hidden,false);
+    assert.equal(d.querySelector('#orderGross').textContent,'90,000원');
+    assert.equal(d.querySelector('#orderFee').textContent,'14원');
+    assert.equal(d.querySelector('#orderTotal').textContent,'90,014원');
+    [...d.querySelectorAll('.company-tabs button')].find(b=>b.textContent==='뉴스·사업').click();
+    assert.equal(d.querySelector('#orderAmount').value,'100000');
+    assert.equal(d.querySelector('#reason').value,'정한 금액 안에서 거래할 거예요');
+    assert.equal(d.querySelector('#trade-evidence input[value="'+evidenceId+'"]').checked,true);
+    w.setTradeEntryMode('quantity');assert.equal(d.querySelector('#qty').readOnly,false);assert.equal(d.querySelector('#qty').value,'2');
+    w.setTradeEntryMode('amount');await w.detail('MKT');await w.detail('HBEL','sell');
+    assert.equal(d.querySelector('#trade-meta').dataset.entryMode,'amount');
+    assert.equal(d.querySelector('#orderAmount').value,'100000');
+    assert.equal(d.querySelector('#orderTotal').textContent,'89,986원');
+    assert.ok(d.querySelector('#amount-order-rule').textContent.includes('수수료 전'));
+    state.assets.find(a=>a.id==='HBEL').price=30000;await w.refresh();
+    assert.equal(d.querySelector('#qty').value,'3','recompute quantity from the retained budget after a quote change');
+    assert.equal(d.querySelector('#orderAmount').value,'100000');
+    state.assets.find(a=>a.id==='HBEL').price=45000;state.holdings[0].qty=1;await w.refresh();
+    assert.equal(d.querySelector('#qty').value,'1');
+    assert.ok(d.querySelector('#amount-order-hint').textContent.includes('보유한 1주'));
+    state.holdings=[];await w.refresh();
+    assert.equal(d.querySelector('.trade-submit').disabled,true);
+    const prior=calls.filter(c=>c.url==='/api/orders').length;await w.place();
+    assert.equal(calls.filter(c=>c.url==='/api/orders').length,prior);
+    state.holdings=[{asset:'HBEL',qty:5,cost:225000}];await w.refresh();w.orderSide('buy');
+    d.querySelector('#orderAmount').value='200000';w.updateOrderTotal();
+    assert.equal(d.querySelector('#qty').value,'2');
+    assert.ok(d.querySelector('#amount-order-hint').textContent.includes('가용 현금 100,000원'));
+    for(const invalid of ['','0','-1','1.5','44999']){
+      d.querySelector('#orderAmount').value=invalid;w.updateOrderTotal();
+      assert.equal(d.querySelector('.trade-submit').disabled,true,invalid);
+      assert.equal(d.querySelector('#orderAmount').getAttribute('aria-invalid'),'true');
+    }
+    d.querySelector('#orderAmount').value='100000';w.orderSide('sell');
+    let confirmation='',sent=null,releaseTrade,orderCount=0;w.confirm=message=>{confirmation=message;return true};
+    const originalFetch=w.fetch;w.fetch=async(url,options)=>{
+      if(url==='/api/orders'){orderCount++;sent=JSON.parse(options.body);return new Promise(resolve=>{releaseTrade=()=>resolve({ok:true,json:async()=>({ok:true,fee:14,message:'거래 완료'})})})}
+      return originalFetch(url,options);
+    };
+    const pendingTrade=w.place();await tick();
+    w.updateOrderTotal();assert.equal(d.querySelector('.trade-submit').disabled,true,'editing the quote must not re-enable an in-flight order');
+    await w.place();assert.equal(orderCount,1);releaseTrade();await pendingTrade;
+    assert.equal(sent.qty,2);assert.equal(sent.side,'sell');assert.equal(sent.expected_price,45000);
+    assert.ok(confirmation.includes('입력 100,000원 이내'));
+    assert.ok(confirmation.includes('받을 금액 89,986원'));
+    assert.equal(w.eval('tradeDrafts.HBEL'),undefined,'do not recreate the submitted draft during refresh');
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('amount orders: floor conversion, exact fee boundaries, cash/holding caps, drafts, quote refresh and canonical fills passed');
+  }
+  {
+    const {dom,w,errors}=await build('teacher'),d=w.document;
+    await w.loadPreview(fixture.preview.player.id);w.goTeacher('preview');await w.detail('HBEL');
+    w.setTradeEntryMode('amount');d.querySelector('#orderAmount').value='100000';w.updateOrderTotal();
+    assert.equal(w.tradeOrderQuote().cash,fixture.preview.player.cash);
+    assert.ok(w.tradeOrderQuote().qty>0);assert.equal(d.querySelector('.trade-submit').disabled,true);
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('amount orders: teacher preview uses student balances and remains read-only');
   }
   for(const role of ['final_student','final_teacher']){
     const {dom,w,errors}=await build(role),d=w.document;
