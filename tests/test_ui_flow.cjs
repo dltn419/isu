@@ -20,7 +20,7 @@ async function build(role, search=process.env.HARU_DESIGN?'?design='+process.env
   if(role !== 'demo') w.localStorage.setItem('haru_token', 'unit-test');
   w.fetch = async (url, options={}) => {
     calls.push({url, options});
-    let data = url === '/api/state' ? state : url === '/api/progression' ? {...state.progression,day:state.room.day,phase:state.room.phase,generation:state.room.generation||0,server_time:Date.now()/1000} : url === '/api/demo' ? fixture.demo :
+    let data = url === '/api/state' ? state : url === '/api/progression' ? {...state.progression,design:state.room.design||'classic',day:state.room.day,phase:state.room.phase,generation:state.room.generation||0,server_time:Date.now()/1000} : url === '/api/demo' ? fixture.demo :
       url.startsWith('/api/history/') ? fixture.history :
       url.startsWith('/api/admin/student/') ? (role.startsWith('final_')?fixture.final_preview:fixture.preview) :
       {ok:true, status:'offline', message:'isolated test'};
@@ -51,7 +51,8 @@ async function build(role, search=process.env.HARU_DESIGN?'?design='+process.env
 
 (async () => {
   {
-    const {dom,w,errors,calls}=await build('student','?design=editorial&compare=1&code=ABCD12#news'),d=w.document;
+    const {dom,w,errors,calls}=await build('demo','?design=editorial&compare=1&code=ABCD12#news'),d=w.document;
+    await w.startDemo();
     assert.equal(w.currentDesign(),'editorial');assert.ok(d.querySelector('#design-comparison'));
     await w.detail('HBEL');w.setTradeEntryMode('amount');
     const amount=d.querySelector('#orderAmount'),reason=d.querySelector('#reason');
@@ -66,7 +67,7 @@ async function build(role, search=process.env.HARU_DESIGN?'?design='+process.env
     assert.equal(d.querySelector('[data-design-choice="classic"]').getAttribute('aria-pressed'),'true');
     d.querySelector('[data-design-choice="editorial"]').click();
     assert.equal(w.currentDesign(),'editorial');assert.equal(calls.length,count,'comparing styles must never make API requests');
-    const article=fixture.student.news.find(n=>n.kind!=='briefing');w.openArticle(article.id);await tick();
+    const article=fixture.demo.news.find(n=>n.kind!=='briefing');w.openArticle(article.id);await tick();
     const modal=d.querySelector('#modal-root .modal');assert.ok(modal);
     w.setDesignPreview('classic');assert.equal(d.querySelector('#modal-root .modal'),modal,'keep the current article open');
     w.closeModal();w.setDesignPreview('editorial');w.closeDesignComparison();
@@ -81,6 +82,58 @@ async function build(role, search=process.env.HARU_DESIGN?'?design='+process.env
       assert.deepEqual(errors,[]);dom.window.close();
     }
     console.log('design comparison: safe default, URL controls, retained inputs/evidence/article, no API writes and dismissal passed');
+  }
+  {
+    const {dom,w,errors,calls}=await build('demo'),d=w.document;
+    w.eval("authMode='create';render()");
+    assert.equal(d.querySelectorAll('.room-design-picker input').length,2);
+    assert.equal(w.selectedRoomDesign(),'classic');
+    d.querySelector('#roomName').value='디자인을 고른 교실';d.querySelector('#pw').value='example123';d.querySelector('#startCash').value='200000';
+    d.querySelector('input[name="room-design-create"][value="editorial"]').click();
+    assert.equal(w.currentDesign(),'editorial');assert.equal(w.selectedRoomDesign(),'editorial');
+    assert.equal(d.querySelector('#roomName').value,'디자인을 고른 교실');
+    await w.startDemo();w.exitDemo();
+    assert.equal(d.querySelector('#roomName').value,'디자인을 고른 교실');
+    assert.equal(d.querySelector('#pw').value,'example123');assert.equal(d.querySelector('#startCash').value,'200000');
+    assert.equal(w.selectedRoomDesign(),'editorial');
+    let sent,created;const originalFetch=w.fetch;w.setToken=result=>{created=result};
+    w.fetch=async(url,options)=>{if(url==='/api/rooms'){sent=JSON.parse(options.body);return{ok:true,json:async()=>({token:'created-room',code:'TEST01',role:'admin'})}}return originalFetch(url,options)};
+    await w.submitAuth();
+    assert.equal(sent.design,'editorial');assert.equal(sent.start_cash,200000);assert.equal(created.role,'admin');
+    assert.equal(w.eval('roomCreationDraft'),null,'discard the temporary creation form after success');
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('room design: create-time choice, instant preview, retained form and persisted creation request passed');
+  }
+  {
+    const {dom,w,errors,state,calls}=await build('student','?design=editorial&compare=1&code=ABCD12#news'),d=w.document;
+    assert.equal(w.currentDesign(),'classic','live rooms use the teacher setting');assert.equal(d.querySelector('#design-comparison'),null);
+    assert.equal(w.location.search,'?code=ABCD12');assert.equal(w.location.hash,'#news');
+    await w.detail('HBEL');w.setTradeEntryMode('amount');
+    const amount=d.querySelector('#orderAmount'),reason=d.querySelector('#reason');amount.value='30000';reason.value='작성 중인 판단을 유지해요';reason.focus();w.updateOrderTotal();
+    const evidence=d.querySelector('#trade-evidence input');if(evidence)evidence.checked=true;
+    state.room.design='editorial';await w.pollProgression();
+    assert.equal(w.currentDesign(),'editorial');assert.equal(d.querySelector('#reason'),reason);
+    assert.equal(amount.value,'30000');assert.equal(reason.value,'작성 중인 판단을 유지해요');
+    assert.equal(d.activeElement,reason);if(evidence)assert.equal(evidence.checked,true);
+    w.setDesignPreview('classic');assert.equal(w.currentDesign(),'editorial');
+    assert.equal(calls.filter(c=>c.options?.method==='POST').length,0);
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('room design: shared polling changes style without replacing focused inputs or selected evidence passed');
+  }
+  {
+    const {dom,w,errors,state}=await build('teacher'),d=w.document;
+    w.goTeacher('admin');w.selectRoomDesign('editorial','admin');
+    const newsDraft=d.querySelector('#nt');newsDraft.value='작성 중인 뉴스 제목';
+    let releaseDesign,designRequests=0,sent;const originalFetch=w.fetch;
+    w.fetch=async(url,options)=>{if(url==='/api/admin/design'){designRequests++;sent=JSON.parse(options.body);return new Promise(resolve=>{releaseDesign=()=>{state.room.design=sent.design;resolve({ok:true,json:async()=>({ok:true,design:sent.design})})}})}return originalFetch(url,options)};
+    const pending=w.saveRoomDesign();await tick();
+    assert.equal(d.querySelector('#room-design-save').disabled,true);await w.saveRoomDesign();assert.equal(designRequests,1);
+    releaseDesign();await pending;
+    assert.equal(sent.design,'editorial');assert.equal(w.currentDesign(),'editorial');assert.equal(d.querySelector('#room-design-save').disabled,false);
+    assert.equal(d.querySelector('input[name="room-design-admin"][value="editorial"]').checked,true);
+    assert.equal(d.querySelector('#nt'),newsDraft);assert.equal(newsDraft.value,'작성 중인 뉴스 제목');
+    assert.deepEqual(errors,[]);dom.window.close();
+    console.log('room design: teacher setting, duplicate-submit protection and shared saved appearance passed');
   }
   for(const role of ['student','teacher']) {
     const {dom,w,errors,calls} = await build(role);

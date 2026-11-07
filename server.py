@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from typing import Literal
 import classroom_engine as engine
 import classroom_guides as guides
 import game_reset
@@ -144,6 +145,8 @@ def init():
   if 'drivers' not in columns:c.execute('ALTER TABLE prices ADD COLUMN drivers TEXT')
   if 'mood' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
    c.execute("ALTER TABLE rooms ADD COLUMN mood TEXT NOT NULL DEFAULT 'neutral'")
+  if 'design' not in {row[1] for row in c.execute('PRAGMA table_info(rooms)')}:
+   c.execute("ALTER TABLE rooms ADD COLUMN design TEXT NOT NULL DEFAULT 'classic'")
   engine.initialize_schema(c)
   game_reset.initialize(c)
   bond_income.initialize(c)
@@ -220,6 +223,9 @@ class CreateRoom(BaseModel):
  name:str=Field(min_length=2,max_length=50)
  password:str=Field(min_length=4,max_length=100)
  start_cash:int=Field(default=100000,ge=1000,le=100000000)
+ design:Literal['classic','editorial']='classic'
+class RoomDesignIn(BaseModel):
+ design:Literal['classic','editorial']
 class Join(BaseModel):
  code:str
  name:str=Field(min_length=1,max_length=24)
@@ -245,7 +251,7 @@ def index(): return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/health')
 def health():
- return {'ok': True,'version':'22.0-design-comparison'}
+ return {'ok': True,'version':'23.0-room-design'}
 
 @app.get('/api/share')
 def share(authorization:str|None=Header(None)):
@@ -270,7 +276,7 @@ def create_room(b:CreateRoom):
    code=secrets.token_hex(3).upper()
    if not one(c,'SELECT id FROM rooms WHERE code=?',(code,)):break
   secret=secrets.token_urlsafe(32)
-  cur=c.execute('INSERT INTO rooms(name,code,admin_hash,start_cash,seed,created,bond_interest_version) VALUES(?,?,?,?,?,?,2)',(b.name.strip(),code,digest(b.password),b.start_cash,secrets.randbelow(1000000000),now()))
+  cur=c.execute('INSERT INTO rooms(name,code,admin_hash,start_cash,seed,created,bond_interest_version,design) VALUES(?,?,?,?,?,?,2,?)',(b.name.strip(),code,digest(b.password),b.start_cash,secrets.randbelow(1000000000),now(),b.design))
   rid=cur.lastrowid
   c.execute('INSERT INTO room_progression(room_id) VALUES(?)',(rid,))
   c.executemany('INSERT INTO prices(room_id,day,asset,price,change) VALUES(?,1,?,?,0)',[(rid,a['id'],a['initial']) for a in ASSETS])
@@ -311,7 +317,7 @@ def state(authorization:str|None=Header(None)):
  s=session(authorization)
  with conn() as c:
   c.execute('BEGIN')
-  r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood,generation,bond_interest_version FROM rooms WHERE id=?',(s['room_id'],)))
+  r=dict(one(c,'SELECT id,name,code,day,phase,start_cash,mood,generation,bond_interest_version,design FROM rooms WHERE id=?',(s['room_id'],)))
   engine.ensure_room(c,r['id'],one(c,'SELECT seed FROM rooms WHERE id=?',(r['id'],))['seed'],r['day'],ASSETS)
   prices=rows(c,'SELECT asset,price,change,drivers FROM prices WHERE room_id=? AND day=?',(r['id'],r['day']))
   for price in prices:price['price_context']=json.loads(price.pop('drivers') or 'null')
@@ -689,7 +695,19 @@ def progression_state(authorization:str|None=Header(None)):
  with conn() as c:
   c.execute('BEGIN')
   r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
-  return progression.snapshot(c,r)
+  return {**progression.snapshot(c,r),'design':r['design']}
+
+@app.post('/api/admin/design')
+def configure_room_design(b:RoomDesignIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None),x_haru_expected_day:int|None=Header(None)):
+ s=admin(authorization)
+ with conn() as c:
+  c.execute('BEGIN IMMEDIATE')
+  check_game_generation(c,s,x_haru_game_generation,x_haru_expected_day)
+  r=one(c,'SELECT * FROM rooms WHERE id=?',(s['room_id'],))
+  if r['design']!=b.design:
+   c.execute('UPDATE rooms SET design=? WHERE id=?',(b.design,r['id']))
+   log(c,r['id'],r['day'],'design','화면 디자인: '+('B · 신문형' if b.design=='editorial' else 'A · 기존'))
+ return {'ok':True,'design':b.design}
 
 @app.post('/api/admin/progression')
 def configure_progression(b:ProgressionIn,authorization:str|None=Header(None),x_haru_game_generation:int|None=Header(None),x_haru_expected_day:int|None=Header(None)):
@@ -798,7 +816,7 @@ def edit_cash(b:CashEdit,authorization:str|None=Header(None),x_haru_game_generat
   log(c,s['room_id'],r['day'],'cash',f"{p['name']}: {b.amount:+,}원 - {b.reason}")
  return {'ok':True}
 @app.get('/api/health')
-def health():return {'ok':True,'db':str(DB.name),'version':'22.0-design-comparison'}
+def health():return {'ok':True,'db':str(DB.name),'version':'23.0-room-design'}
 
 # Completion follows actual activity; a failed trade leaves the signal unchanged.
 def resume_selection(c,s,day):

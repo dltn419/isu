@@ -36,7 +36,7 @@ def collect_snapshot(c, room):
     rid = room['id']
     snapshot = {
         'format': 'haru-play-backup-v1',
-        'room': {k: room[k] for k in ('id', 'name', 'code', 'day', 'phase', 'start_cash', 'seed', 'mood', 'generation', 'bond_interest_version')},
+        'room': {k: room[k] for k in ('id', 'name', 'code', 'day', 'phase', 'start_cash', 'seed', 'mood', 'generation', 'bond_interest_version', 'design')},
         'players': [dict(r) for r in c.execute('SELECT id,name,cash FROM players WHERE room_id=?', (rid,))],
         'tables': {},
     }
